@@ -1,9 +1,8 @@
-# shadecore
+<p align="center">
+  <img width="45%" height="45%" src="https://github.com/schwwaaa/shadecore/blob/main/media/shadecore-logo.png?raw=true"/>  
+</p>
 
-A **native, high‑performance GLSL rendering engine** written in Rust, designed for **real‑time shader experimentation, MIDI control, and live video routing via Syphon** on macOS.
-
-This project follows the same documentation philosophy as the Videobeaux ecosystem:  
-**clear purpose, reproducible builds, explicit runtime behavior, and artist‑oriented use cases.**
+<p align="center"><em>A native, high‑performance GLSL rendering engine written in Rust, designed for real‑time shader experimentation, MIDI control, and live video routing via Syphon on macOS.</em></p> 
 
 ---
 
