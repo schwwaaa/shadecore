@@ -2,13 +2,13 @@
   <img width="45%" height="45%" src="https://github.com/schwwaaa/shadecore/blob/main/media/shadecore-logo.png?raw=true"/>  
 </p>
 
-<p align="center"><em>A native, high‑performance GLSL rendering engine written in Rust, designed for real‑time shader experimentation, MIDI control, and live video routing via Syphon on macOS.</em></p> 
+<p align="center"><em>A native, high‑performance GLSL rendering engine written in Rust, designed for real‑time shader experimentation, MIDI control, and live video routing.</em></p> 
 
 ---
 
 ## Description
 
-`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a **Syphon video source**.
+`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a FBO texture or Syphon.
 
 It is designed to be:
 - fast enough for feedback systems,
@@ -63,12 +63,7 @@ This will:
 - copy `Syphon.framework` next to the binary
 - launch the renderer
 - expose a Syphon server immediately
-
-#### Hotkeys
-1 = FBO Texture Output
-2 = Syphon
-3 = PLACEHOLDER
-
+- 
 ---
 
 ## Project Structure
