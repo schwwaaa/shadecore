@@ -1,1 +1,188 @@
-# shadecore
+# glsl_engine
+
+A **native, high‑performance GLSL rendering engine** written in Rust, designed for **real‑time shader experimentation, MIDI control, and live video routing via Syphon** on macOS.
+
+This project follows the same documentation philosophy as the Videobeaux ecosystem:  
+**clear purpose, reproducible builds, explicit runtime behavior, and artist‑oriented use cases.**
+
+---
+
+## Description
+
+`glsl_engine` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a **Syphon video source**.
+
+It is designed to be:
+- fast enough for feedback systems,
+- deterministic enough for installations,
+- flexible enough to act as a base for many future tools.
+
+There is **no GUI framework**, **no WebView**, and **no runtime abstraction layer** between your shader and the GPU.
+
+---
+
+## Purpose
+
+This project exists to solve a common problem in creative coding:
+
+> *“I want to build my own visual tools without shipping an entire framework.”*
+
+`glsl_engine` is intended to be:
+- a **foundation** for custom shader‑based applications,
+- a **bridge** between GLSL and external control systems,
+- a **standalone binary** rather than a patch inside another tool.
+
+---
+
+## Features
+
+- Native OpenGL rendering (via `glow`)
+- Fullscreen GLSL fragment shader pipeline
+- MIDI parameter control (CoreMIDI)
+- JSON‑defined parameter schema
+- Syphon server output (macOS)
+- Vendored framework dependencies (no system installs)
+- Deterministic build & runtime behavior
+
+---
+
+## Running the Project
+
+### Requirements
+- macOS (Apple Silicon recommended)
+- Rust (stable)
+- Xcode Command Line Tools
+- Syphon.framework (vendored in this repo)
+
+### Build & Run
+
+```bash
+cargo run
+```
+
+This will:
+- compile the engine
+- copy `Syphon.framework` next to the binary
+- launch the renderer
+- expose a Syphon server immediately
+
+---
+
+## Project Structure
+
+```
+glsl_engine/
+├─ src/
+│  └─ main.rs              # Core engine loop
+├─ native/
+│  ├─ syphon_bridge.m      # Objective‑C Syphon bridge
+│  └─ syphon_bridge.h
+├─ vendor/
+│  └─ Syphon.framework     # Vendored framework
+├─ params.json             # Parameter & MIDI schema
+├─ build.rs                # Framework linking + rpath logic
+└─ Cargo.toml
+```
+
+---
+
+## Dependencies
+
+### Rust Crates
+- `glow` – OpenGL bindings
+- `winit` / `glutin` – window + context
+- `midir` – MIDI input
+- `serde` / `serde_json` – parameter parsing
+
+### Native Frameworks
+- OpenGL
+- Cocoa / AppKit
+- CoreMIDI
+- **Syphon** (vendored)
+
+---
+
+## How It Works
+
+### 1. OpenGL Rendering
+- A window and OpenGL context are created using `winit` + `glutin`
+- A fullscreen triangle is drawn every frame
+- The fragment shader is responsible for all visual output
+
+### 2. Shader Uniforms
+The engine provides:
+- `u_time` – seconds since start
+- `u_resolution` – window size in pixels
+- user‑defined parameters (from JSON + MIDI)
+
+### 3. Render Target
+- Rendering occurs into an offscreen framebuffer
+- The framebuffer texture is:
+  - drawn to the window
+  - published to Syphon
+
+### 4. Syphon Publishing
+- The OpenGL texture ID is passed to Syphon
+- Other apps can receive frames in real time
+
+---
+
+## Parameters & MIDI
+
+Parameters are defined in a JSON file:
+
+```json
+{
+  "version": 1,
+  "params": [
+    {
+      "name": "speed",
+      "ty": "float",
+      "min": 0.0,
+      "max": 5.0,
+      "default": 1.0,
+      "midi_cc": 1
+    }
+  ]
+}
+```
+
+- MIDI CC values (0–127) are normalized
+- Values are scaled into parameter ranges
+- Parameters are updated every frame
+
+This makes controller layouts reproducible and portable.
+
+---
+
+## Use Cases
+
+- Live shader performance
+- Visual instruments
+- Generative art installations
+- Feedback‑based video systems
+- Custom tools for OBS / Resolume / TouchDesigner pipelines
+
+---
+
+## Roadmap
+
+- Hot‑loading shaders from disk
+- Multi‑pass rendering / feedback buffers
+- `.app` bundling
+- Windows backend (Spout)
+- OSC / network control
+
+---
+
+## Philosophy
+
+This tool is intentionally **minimal and explicit**.
+
+Instead of abstracting creativity behind interfaces,  
+`glsl_engine` gives you **direct control of the GPU** and lets you decide what the software should become.
+
+---
+
+## License
+
+TBD

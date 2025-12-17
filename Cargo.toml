@@ -1,0 +1,25 @@
+[package]
+name = "glsl_engine"
+version = "0.1.0"
+edition = "2021"
+
+# Segment 4 (macOS): Syphon output
+# - Render shader into an FBO texture
+# - Publish that texture via Syphon (Objective-C bridge)
+# - Still display it in the window
+
+[dependencies]
+glow = "0.16"
+winit = "0.29"
+glutin = "0.31"
+glutin-winit = "0.4"
+raw-window-handle = "0.5"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+midir = "0.10"
+anyhow = "1"
+
+[build-dependencies]
+cc = "1"
