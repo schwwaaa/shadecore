@@ -1,4 +1,4 @@
-# glsl_engine
+# shadework
 
 A **native, high‑performance GLSL rendering engine** written in Rust, designed for **real‑time shader experimentation, MIDI control, and live video routing via Syphon** on macOS.
 
@@ -9,7 +9,7 @@ This project follows the same documentation philosophy as the Videobeaux ecosyst
 
 ## Description
 
-`glsl_engine` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a **Syphon video source**.
+`shadework` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a **Syphon video source**.
 
 It is designed to be:
 - fast enough for feedback systems,
@@ -26,7 +26,7 @@ This project exists to solve a common problem in creative coding:
 
 > *“I want to build my own visual tools without shipping an entire framework.”*
 
-`glsl_engine` is intended to be:
+`shadework` is intended to be:
 - a **foundation** for custom shader‑based applications,
 - a **bridge** between GLSL and external control systems,
 - a **standalone binary** rather than a patch inside another tool.
@@ -70,7 +70,7 @@ This will:
 ## Project Structure
 
 ```
-glsl_engine/
+shadework/
 ├─ src/
 │  └─ main.rs              # Core engine loop
 ├─ native/
@@ -179,7 +179,7 @@ This makes controller layouts reproducible and portable.
 This tool is intentionally **minimal and explicit**.
 
 Instead of abstracting creativity behind interfaces,  
-`glsl_engine` gives you **direct control of the GPU** and lets you decide what the software should become.
+`shadework` gives you **direct control of the GPU** and lets you decide what the software should become.
 
 ---
 
