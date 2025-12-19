@@ -1,0 +1,15 @@
+{
+  "output_mode": "texture",
+  "syphon": {
+    "enabled": false,
+    "server_name": "shadecore"
+  },
+  "spout": {
+    "enabled": false
+  },
+  "hotkeys": {
+    "texture": ["Digit1", "Numpad1"],
+    "syphon":  ["Digit2", "Numpad2"],
+    "spout":   ["Digit3", "Numpad3"]
+  }
+}

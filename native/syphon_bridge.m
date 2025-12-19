@@ -16,7 +16,7 @@
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl3.h>
 
-#import <Syphon/Syphon.h>
+#import "Syphon.h"
 
 #import "syphon_bridge.h"
 

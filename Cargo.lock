@@ -231,6 +231,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1022,9 +1031,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cc",
+ "cmake",
  "glow",
  "glutin",
  "glutin-winit",
+ "libloading",
  "midir",
  "raw-window-handle 0.5.2",
  "serde",

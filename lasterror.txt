@@ -1,0 +1,44 @@
+cargo run shadecore
+warning: unused variable: `target`
+   --> build.rs:185:17
+    |
+185 |             let target = fs::read_link(&from)?;
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `shadecore` (build script) generated 1 warning
+warning: unused doc comment
+   --> src\main.rs:304:1
+    |
+304 | / /// -------------------------------
+305 | | /// Spout2 C-ABI bridge (Windows only)
+306 | | /// -------------------------------
+    | |___________________________________^
+307 |   #[cfg(target_os = "windows")]
+308 | / extern "C" {
+309 | |     fn spout_init_sender(sender_name_utf8: *const i8, width: i32, height:...
+310 | |     fn spout_send_gl_texture(gl_tex_id: u32, width: i32, height: i32, inv...
+311 | |     fn spout_shutdown();
+312 | | }
+    | |_- rustdoc does not generate documentation for extern blocks
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `type` is never read
+   --> src\main.rs:158:5
+    |
+155 | struct ParamDef {
+    |        -------- field in this struct
+...
+158 |     r#type: Option<String>,
+    |     ^^^^^^
+    |
+    = note: `ParamDef` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `shadecore` (bin "shadecore") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running `target\debug\shadecore.exe shadecore`
+error: process didn't exit successfully: `target\debug\shadecore.exe shadecore` (exit code: 0xc0000142, STATUS_DLL_INIT_FAILED)

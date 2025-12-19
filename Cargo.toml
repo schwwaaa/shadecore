@@ -23,3 +23,11 @@ anyhow = "1"
 
 [build-dependencies]
 cc = "1"
+cmake = "0.1"
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_syphon)'] }
