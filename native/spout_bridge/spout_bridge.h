@@ -1,24 +1,25 @@
 #pragma once
 
+#include <stdint.h>
+
 #ifdef _WIN32
-  #define SPOUT_API __declspec(dllexport)
+  #define SPOUT_BRIDGE_API __declspec(dllexport)
 #else
-  #define SPOUT_API
+  #define SPOUT_BRIDGE_API
 #endif
 
 extern "C" {
 
+// Initialize a Spout sender (creates sender if needed).
 // Returns 1 on success, 0 on failure.
-SPOUT_API int spout_init_sender(const char* senderName, int width, int height);
+SPOUT_BRIDGE_API int spout_init_sender(const char* sender_name_utf8, int width, int height);
 
-// Send an OpenGL texture (GLuint) via Spout.
-// invert = 1 if your texture is upside-down (common with FBOs), else 0.
-SPOUT_API int spout_send_gl_texture(unsigned int glTexId, int width, int height, int invert);
+// Send an OpenGL texture (GL_TEXTURE_2D) via Spout.
+// invert: 1 to invert vertically, 0 for normal.
+// Returns 1 on success, 0 on failure.
+SPOUT_BRIDGE_API int spout_send_gl_texture(uint32_t gl_tex_id, int width, int height, int invert);
 
-// Optional: update sender name at runtime.
-SPOUT_API int spout_set_sender_name(const char* senderName);
+// Shutdown / release sender resources.
+SPOUT_BRIDGE_API void spout_shutdown();
 
-// Shut down and release resources.
-SPOUT_API void spout_shutdown();
-
-}
+} // extern "C"
