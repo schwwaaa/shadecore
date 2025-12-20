@@ -14,10 +14,13 @@ use serde::Deserialize;
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io::Write;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -33,6 +36,7 @@ enum OutputMode {
     Texture,
     Syphon,
     Spout,
+    Stream,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -45,6 +49,96 @@ struct OutputConfigFile {
 
     #[serde(default)]
     spout: SpoutCfg,
+
+    #[serde(default)]
+    stream: StreamCfg,
+
+    #[serde(default)]
+    hotkeys: HotkeysCfg,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StreamCfg {
+    /// Master on/off for Stream output.
+    #[serde(default)]
+    enabled: bool,
+
+    /// "rtsp" (push to an RTSP server) or "rtmp" (push to a streaming platform ingest).
+    #[serde(default = "default_stream_target")]
+    target: StreamTarget,
+
+    /// RTSP publish URL (requires an RTSP server like MediaMTX running on the URL host/port).
+    #[serde(default = "default_rtsp_url")]
+    rtsp_url: String,
+
+    /// RTMP publish URL, including stream key if your platform expects it.
+    #[serde(default)]
+    rtmp_url: Option<String>,
+
+    /// Frames per second to encode/stream.
+    #[serde(default = "default_stream_fps")]
+    fps: u32,
+
+    /// Video bitrate in kbps.
+    #[serde(default = "default_stream_bitrate_kbps")]
+    bitrate_kbps: u32,
+
+    /// Keyframe interval (GOP) in frames.
+    #[serde(default = "default_stream_gop")]
+    gop: u32,
+
+    /// Apply a vertical flip before encoding (OpenGL readback is typically upside-down).
+    #[serde(default = "default_true")]
+    vflip: bool,
+
+    /// Optional ffmpeg binary path. If not set, we'll try "ffmpeg" from PATH.
+    #[serde(default)]
+    ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StreamTarget {
+    Rtsp,
+    Rtmp,
+}
+
+fn default_stream_target() -> StreamTarget {
+    StreamTarget::Rtsp
+}
+
+fn default_rtsp_url() -> String {
+    // Common local default when using an RTSP server like MediaMTX.
+    "rtsp://127.0.0.1:8554/shadecore".to_string()
+}
+
+fn default_stream_fps() -> u32 {
+    60
+}
+
+fn default_stream_bitrate_kbps() -> u32 {
+    8000
+}
+
+fn default_stream_gop() -> u32 {
+    // 2 seconds @ 60fps.
+    120
+}
+
+impl Default for StreamCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target: default_stream_target(),
+            rtsp_url: default_rtsp_url(),
+            rtmp_url: None,
+            fps: default_stream_fps(),
+            bitrate_kbps: default_stream_bitrate_kbps(),
+            gop: default_stream_gop(),
+            vflip: true,
+            ffmpeg_path: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -66,6 +160,98 @@ struct SpoutCfg {
 
     #[serde(default = "default_true")]
     invert: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HotkeysCfg {
+    #[serde(default = "default_hotkeys_texture")]
+    texture: Vec<String>,
+    #[serde(default = "default_hotkeys_syphon")]
+    syphon: Vec<String>,
+    #[serde(default = "default_hotkeys_spout")]
+    spout: Vec<String>,
+    #[serde(default = "default_hotkeys_stream")]
+    stream: Vec<String>,
+}
+
+fn default_hotkeys_texture() -> Vec<String> {
+    vec!["Digit1".into(), "Numpad1".into()]
+}
+fn default_hotkeys_syphon() -> Vec<String> {
+    vec!["Digit2".into(), "Numpad2".into()]
+}
+fn default_hotkeys_spout() -> Vec<String> {
+    vec!["Digit3".into(), "Numpad3".into()]
+}
+fn default_hotkeys_stream() -> Vec<String> {
+    vec!["Digit4".into(), "Numpad4".into()]
+}
+
+impl Default for HotkeysCfg {
+    fn default() -> Self {
+        Self {
+            texture: default_hotkeys_texture(),
+            syphon: default_hotkeys_syphon(),
+            spout: default_hotkeys_spout(),
+            stream: default_hotkeys_stream(),
+        }
+    }
+}
+
+fn parse_keycode(name: &str) -> Option<KeyCode> {
+    match name {
+        "Digit0" => Some(KeyCode::Digit0),
+        "Digit1" => Some(KeyCode::Digit1),
+        "Digit2" => Some(KeyCode::Digit2),
+        "Digit3" => Some(KeyCode::Digit3),
+        "Digit4" => Some(KeyCode::Digit4),
+        "Digit5" => Some(KeyCode::Digit5),
+        "Digit6" => Some(KeyCode::Digit6),
+        "Digit7" => Some(KeyCode::Digit7),
+        "Digit8" => Some(KeyCode::Digit8),
+        "Digit9" => Some(KeyCode::Digit9),
+
+        "Numpad0" => Some(KeyCode::Numpad0),
+        "Numpad1" => Some(KeyCode::Numpad1),
+        "Numpad2" => Some(KeyCode::Numpad2),
+        "Numpad3" => Some(KeyCode::Numpad3),
+        "Numpad4" => Some(KeyCode::Numpad4),
+        "Numpad5" => Some(KeyCode::Numpad5),
+        "Numpad6" => Some(KeyCode::Numpad6),
+        "Numpad7" => Some(KeyCode::Numpad7),
+        "Numpad8" => Some(KeyCode::Numpad8),
+        "Numpad9" => Some(KeyCode::Numpad9),
+
+        // Common aliases (feel free to extend)
+        "KeyT" => Some(KeyCode::KeyT),
+        "KeyS" => Some(KeyCode::KeyS),
+        _ => None,
+    }
+}
+
+fn build_hotkey_map(cfg: &HotkeysCfg) -> HashMap<KeyCode, OutputMode> {
+    let mut map = HashMap::new();
+    for k in &cfg.texture {
+        if let Some(code) = parse_keycode(k) {
+            map.insert(code, OutputMode::Texture);
+        }
+    }
+    for k in &cfg.syphon {
+        if let Some(code) = parse_keycode(k) {
+            map.insert(code, OutputMode::Syphon);
+        }
+    }
+    for k in &cfg.spout {
+        if let Some(code) = parse_keycode(k) {
+            map.insert(code, OutputMode::Spout);
+        }
+    }
+    for k in &cfg.stream {
+        if let Some(code) = parse_keycode(k) {
+            map.insert(code, OutputMode::Stream);
+        }
+    }
+    map
 }
 
 fn default_true() -> bool {
@@ -99,6 +285,8 @@ fn load_output_config(path: &Path, default_mode: OutputMode) -> OutputConfigFile
         output_mode: default_mode,
         syphon: SyphonCfg::default(),
         spout: SpoutCfg::default(),
+        stream: StreamCfg::default(),
+        hotkeys: HotkeysCfg::default(),
     };
 
     let data = match std::fs::read_to_string(path) {
@@ -344,6 +532,276 @@ impl SpoutSender {
 impl Drop for SpoutSender {
     fn drop(&mut self) {
         unsafe { spout_shutdown() };
+    }
+}
+
+/// -------------------------------
+/// FFmpeg stream output (cross-platform)
+///
+/// This uses CPU readback (glReadPixels) and pipes raw RGBA frames to ffmpeg.
+///
+/// IMPORTANT (RTSP): by default we *push* to an RTSP server. That means you must
+/// have an RTSP server running at the host/port in `stream.rtsp_url` (e.g. MediaMTX),
+/// then connect VLC to that URL. ffmpeg itself is not automatically an RTSP server.
+/// (ffmpeg protocols docs show publishing to an RTSP server.)
+/// -------------------------------
+
+enum StreamMsg {
+    Frame(Vec<u8>),
+    Stop,
+}
+
+struct StreamSender {
+    cfg: StreamCfg,
+    w: i32,
+    h: i32,
+
+    // CPU readback buffer (reused)
+    buf_rgba: Vec<u8>,
+
+    // writer thread control
+    tx: Option<mpsc::SyncSender<StreamMsg>>,
+    worker: Option<thread::JoinHandle<()>>,
+
+    // throttling (avoid sending more frames than requested)
+    last_send: Instant,
+
+    warned: bool,
+}
+
+impl StreamSender {
+    fn new(cfg: StreamCfg) -> Self {
+        Self {
+            cfg,
+            w: 0,
+            h: 0,
+            buf_rgba: Vec::new(),
+            tx: None,
+            worker: None,
+            last_send: Instant::now(),
+            warned: false,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.cfg.enabled
+    }
+
+    fn ensure_running(&mut self, w: i32, h: i32) {
+        if !self.cfg.enabled {
+            self.stop();
+            return;
+        }
+
+        // restart if size changed or not running
+        let needs_restart = self.tx.is_none() || self.w != w || self.h != h;
+        if !needs_restart {
+            return;
+        }
+
+        self.stop();
+        self.w = w;
+        self.h = h;
+
+        let bytes = (w.max(1) as usize) * (h.max(1) as usize) * 4;
+        self.buf_rgba.resize(bytes, 0);
+
+        let ffmpeg = self
+            .cfg
+            .ffmpeg_path
+            .clone()
+            .unwrap_or_else(|| "ffmpeg".to_string());
+
+        let mut args: Vec<String> = Vec::new();
+
+        // Input: raw RGBA frames via stdin
+        args.extend([
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{}x{}", w, h),
+            "-r",
+            &self.cfg.fps.to_string(),
+            "-i",
+            "-",
+        ].into_iter().map(|s| s.to_string()));
+
+        if self.cfg.vflip {
+            args.extend(["-vf", "vflip"].into_iter().map(|s| s.to_string()));
+        }
+
+        // Encode: H.264 low-latency
+        args.extend([
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            &self.cfg.gop.to_string(),
+            "-b:v",
+            &format!("{}k", self.cfg.bitrate_kbps),
+        ].into_iter().map(|s| s.to_string()));
+
+        match self.cfg.target {
+            StreamTarget::Rtsp => {
+                // Push to an RTSP server (e.g. MediaMTX).
+                // ffmpeg protocols docs: `ffmpeg -re -i input -f rtsp ... rtsp://server/live.sdp`
+                args.extend([
+                    "-f",
+                    "rtsp",
+                    "-rtsp_transport",
+                    "tcp",
+                    "-muxdelay",
+                    "0.1",
+                ].into_iter().map(|s| s.to_string()));
+                args.push(self.cfg.rtsp_url.clone());
+
+                if !self.warned {
+                    println!("[stream] RTSP mode is PUSH: you need an RTSP server running at {} (e.g. MediaMTX), then open that URL in VLC.", self.cfg.rtsp_url);
+                    println!("[stream] If no RTSP server is running, ffmpeg can block while connecting and you won't see a stream in VLC.");
+                    self.warned = true;
+                }
+            }
+            StreamTarget::Rtmp => {
+                let Some(url) = self.cfg.rtmp_url.clone() else {
+                    if !self.warned {
+                        println!("[stream] target=rtmp but rtmp_url is missing in output.json.");
+                        self.warned = true;
+                    }
+                    return;
+                };
+                // Most platforms expect FLV over RTMP.
+                args.extend(["-f", "flv"].into_iter().map(|s| s.to_string()));
+                args.push(url);
+            }
+        }
+
+        let (tx, rx) = mpsc::sync_channel::<StreamMsg>(2);
+
+        let worker = thread::spawn(move || {
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(&args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("[stream] Failed to start ffmpeg: {}", e);
+                    println!("[stream] Tip: install ffmpeg or set stream.ffmpeg_path in output.json");
+                    return;
+                }
+            };
+
+            let Some(mut stdin) = child.stdin.take() else {
+                println!("[stream] Failed to open ffmpeg stdin.");
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            };
+
+            println!("[stream] ffmpeg started ({}x{}, writing frames)", w, h);
+
+            // Writer loop. If ffmpeg is blocked connecting (e.g. no RTSP server),
+            // writes may block — but this is on a background thread so the UI won't freeze.
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    StreamMsg::Frame(frame) => {
+                        if let Err(e) = stdin.write_all(&frame) {
+                            println!("[stream] ffmpeg stdin write failed: {}", e);
+                            break;
+                        }
+                    }
+                    StreamMsg::Stop => {
+                        break;
+                    }
+                }
+            }
+
+            // Cleanup
+            let _ = child.kill();
+            let _ = child.wait();
+            println!("[stream] ffmpeg stopped");
+        });
+
+        self.tx = Some(tx);
+        self.worker = Some(worker);
+        self.last_send = Instant::now();
+        // reset warn once per start
+        // (warned flag is used for config warnings; keep current value)
+    }
+
+    fn send_current_fbo_frame(
+        &mut self,
+        gl: &glow::Context,
+        fbo: glow::NativeFramebuffer,
+        w: i32,
+        h: i32,
+    ) {
+        if !self.cfg.enabled {
+            return;
+        }
+
+        self.ensure_running(w, h);
+        let Some(tx) = self.tx.as_ref() else { return; };
+
+        // Throttle to configured fps.
+        let interval = Duration::from_secs_f64(1.0 / self.cfg.fps.max(1) as f64);
+        if self.last_send.elapsed() < interval {
+            return;
+        }
+        self.last_send = Instant::now();
+
+        // Read back RGBA from the render target FBO.
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.read_pixels(
+                0,
+                0,
+                w,
+                h,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut self.buf_rgba)),
+            );
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+
+        // Copy bytes into an owned frame for the worker thread.
+        // (Keeping it simple + safe; performance can be optimized later.)
+        let frame = self.buf_rgba.clone();
+
+        // Non-blocking send: drop frames if the worker is behind (prevents UI stalls).
+        if tx.try_send(StreamMsg::Frame(frame)).is_err() {
+            // drop frame
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.try_send(StreamMsg::Stop);
+        }
+
+        // Do NOT join here (worker may be blocked in IO in bad network situations).
+        // It will exit once ffmpeg unblocks or is killed by OS on process exit.
+        self.worker.take();
+    }
+}
+
+impl Drop for StreamSender {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -674,15 +1132,38 @@ fn main() {
     let spout_enabled = output_cfg.spout.enabled;
     let spout_invert = output_cfg.spout.invert;
 
+    let stream_cfg = output_cfg.stream.clone();
+    let stream_enabled = stream_cfg.enabled;
+    let hotkey_map = build_hotkey_map(&output_cfg.hotkeys);
+
     let mut output_mode = output_cfg.output_mode;
 
     println!(
-        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={}",
-        output_mode, syphon_enabled, syphon_name, spout_enabled, spout_name, spout_invert
+        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?}",
+        output_mode,
+        syphon_enabled,
+        syphon_name,
+        spout_enabled,
+        spout_name,
+        spout_invert,
+        stream_enabled,
+        stream_cfg.target
+    );
+
+    println!(
+        "[output] stream.enabled={} target={:?} rtsp_url='{}' rtmp_url={:?} fps={} bitrate_kbps={} gop={} vflip={}",
+        stream_enabled,
+        stream_cfg.target,
+        stream_cfg.rtsp_url,
+        stream_cfg.rtmp_url,
+        stream_cfg.fps,
+        stream_cfg.bitrate_kbps,
+        stream_cfg.gop,
+        stream_cfg.vflip
     );
 
     window.set_title(&format!(
-        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout)",
+        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream)",
         output_mode
     ));
 
@@ -695,6 +1176,8 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     let mut spout: Option<SpoutSender> = None;
+
+    let mut stream = StreamSender::new(stream_cfg.clone());
 
     let mut warned = false;
     let start = Instant::now();
@@ -710,19 +1193,17 @@ fn main() {
                     WindowEvent::KeyboardInput { event, .. } => {
                         if event.state.is_pressed() {
                             if let PhysicalKey::Code(code) = event.physical_key {
-                                let new_mode = match code {
-                                    KeyCode::Digit1 | KeyCode::Numpad1 => Some(OutputMode::Texture),
-                                    KeyCode::Digit2 | KeyCode::Numpad2 => Some(OutputMode::Syphon),
-                                    KeyCode::Digit3 | KeyCode::Numpad3 => Some(OutputMode::Spout),
-                                    _ => None,
-                                };
+                                let new_mode = hotkey_map.get(&code).copied();
 
                                 if let Some(m) = new_mode {
+                                    if output_mode == OutputMode::Stream && m != OutputMode::Stream {
+                                        stream.stop();
+                                    }
                                     output_mode = m;
                                     warned = false;
                                     println!("[output] switched -> {:?}", output_mode);
                                     window.set_title(&format!(
-                                        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout)",
+                                        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream)",
                                         output_mode
                                     ));
                                 }
@@ -777,6 +1258,17 @@ fn main() {
 
                         match output_mode {
                             OutputMode::Texture => {}
+
+                            OutputMode::Stream => {
+                                if !stream.is_enabled() {
+                                    if !warned {
+                                        println!("[output] Stream requested but disabled in output.json. Falling back to Texture.");
+                                        warned = true;
+                                    }
+                                } else {
+                                    stream.send_current_fbo_frame(&gl, rt.fbo, w, h);
+                                }
+                            }
 
                             OutputMode::Syphon => {
                                 #[cfg(all(target_os = "macos", has_syphon))]

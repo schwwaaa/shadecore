@@ -7,9 +7,23 @@
     "spout": {
         "enabled": true
     },
+    "stream": {
+        "enabled": true,
+        "width": 1280,
+        "height": 720,
+        "target": "rtsp",
+        "rtsp_url": "rtsp://127.0.0.1:8554/shadecore",
+        "rtmp_url": null,
+        "fps": 60,
+        "bitrate_kbps": 8000,
+        "gop": 120,
+        "vflip": true,
+        "ffmpeg_path": null
+    },
     "hotkeys": {
         "texture": ["Digit1", "Numpad1"],
         "syphon": ["Digit2", "Numpad2"],
-        "spout": ["Digit3", "Numpad3"]
+        "spout": ["Digit3", "Numpad3"],
+        "stream": ["Digit4", "Numpad4"]
     }
 }

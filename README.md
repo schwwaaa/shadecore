@@ -8,7 +8,12 @@
 
 ## Description
 
-`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and publishes the output as a FBO texture or Syphon.
+`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and can route the output as:
+
+- local window preview (FBO texture)
+- **Syphon** (macOS)
+- **Spout2** (Windows)
+- **Stream** via FFmpeg (RTSP for local network; RTMP for platforms)
 
 It is designed to be:
 - fast enough for feedback systems,
@@ -39,7 +44,9 @@ This project exists to solve a common problem in creative coding:
 - MIDI parameter control (CoreMIDI)
 - JSON‑defined parameter schema
 - Syphon server output (macOS)
-- Vendored framework dependencies (no system installs)
+- Spout2 sender output (Windows)
+- FFmpeg streaming output (RTSP/RTMP)
+- Vendored framework dependencies (no system installs for Syphon/Spout)
 - Deterministic build & runtime behavior
 
 ---
@@ -47,10 +54,13 @@ This project exists to solve a common problem in creative coding:
 ## Running the Project
 
 ### Requirements
-- macOS (Apple Silicon recommended)
+- macOS or Windows (Linux builds for local preview are possible)
 - Rust (stable)
-- Xcode Command Line Tools
-- Syphon.framework (vendored in this repo)
+
+Platform extras:
+- macOS: Xcode Command Line Tools (Syphon.framework is vendored)
+- Windows: Visual Studio Build Tools (Spout2 is vendored)
+- Streaming: FFmpeg available in PATH, or set `stream.ffmpeg_path` in `assets/output*.json`
 
 ### Build & Run
 
@@ -60,10 +70,15 @@ cargo run
 
 This will:
 - compile the engine
-- copy `Syphon.framework` next to the binary
 - launch the renderer
-- expose a Syphon server immediately
-- 
+- load defaults from `assets/params.json` and `assets/output.json`
+- show a local preview window (always)
+
+Switch outputs at runtime (defaults, configurable in `assets/output*.json`):
+- `1` = Texture (preview only)
+- `2` = Syphon (macOS)
+- `3` = Spout2 (Windows)
+- `4` = Stream (FFmpeg RTSP/RTMP)
 ---
 
 ## Project Structure
@@ -73,11 +88,15 @@ shadecore/
 ├─ src/
 │  └─ main.rs              # Core engine loop
 ├─ native/
+│  ├─ spout_bridge/         # C++ Spout2 bridge (Windows)
 │  ├─ syphon_bridge.m      # Objective‑C Syphon bridge
 │  └─ syphon_bridge.h
 ├─ vendor/
 │  └─ Syphon.framework     # Vendored framework
-├─ params.json             # Parameter & MIDI schema
+├─ assets/
+│  ├─ params.json          # Parameter & MIDI schema
+│  ├─ output.json          # Output routing (mode, hotkeys, stream settings)
+│  └─ shaders/             # default.frag / present.frag
 ├─ build.rs                # Framework linking + rpath logic
 └─ Cargo.toml
 ```
