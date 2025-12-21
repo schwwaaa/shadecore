@@ -1,39 +1,52 @@
 {
-  "output_mode": "texture",
-  "syphon": {
-    "enabled": false,
-    "server_name": "shadecore"
-  },
-  "spout": {
-    "enabled": false
-  },
-  "stream": {
-    "enabled": false,
-    "target": "rtsp",
-    "rtsp_url": "rtsp://127.0.0.1:8554/shadecore",
-    "rtmp_url": null,
-    "fps": 60,
-    "bitrate_kbps": 8000,
-    "gop": 120,
-    "vflip": true,
-    "ffmpeg_path": null
-  },
-  "hotkeys": {
-    "texture": [
-      "Digit1",
-      "Numpad1"
-    ],
-    "syphon": [
-      "Digit2",
-      "Numpad2"
-    ],
-    "spout": [
-      "Digit3",
-      "Numpad3"
-    ],
-    "stream": [
-      "Digit4",
-      "Numpad4"
-    ]
-  }
+    "output_mode": "texture",
+    "syphon": {
+        "enabled": false,
+        "server_name": "shadecore"
+    },
+    "spout": {
+        "enabled": false
+    },
+    "stream": {
+        "enabled": false,
+        "target": "rtsp",
+        "rtsp_url": "rtsp://127.0.0.1:8554/shadecore",
+        "rtmp_url": null,
+        "fps": 60,
+        "bitrate_kbps": 8000,
+        "gop": 120,
+        "vflip": true,
+        "ffmpeg_path": null
+    },
+    "hotkeys": {
+        "texture": [
+            "Digit1",
+            "Numpad1"
+        ],
+        "syphon": [
+            "Digit2",
+            "Numpad2"
+        ],
+        "spout": [
+            "Digit3",
+            "Numpad3"
+        ],
+        "stream": [
+            "Digit4",
+            "Numpad4"
+        ],
+        "ndi": [
+            "Digit6",
+            "Numpad6"
+        ]
+    },
+    "ndi": {
+        "enabled": false,
+        "name": "shadecore",
+        "groups": null,
+        "clock_video": true,
+        "fps_n": 60,
+        "fps_d": 1,
+        "vflip": true
+    }
 }

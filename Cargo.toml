@@ -3,11 +3,6 @@ name = "shadecore"
 version = "0.1.0"
 edition = "2021"
 
-# Segment 4 (macOS): Syphon output
-# - Render shader into an FBO texture
-# - Publish that texture via Syphon (Objective-C bridge)
-# - Still display it in the window
-
 [dependencies]
 glow = "0.16"
 winit = "0.29"
@@ -20,6 +15,14 @@ serde_json = "1"
 
 midir = "0.10"
 anyhow = "1"
+
+# Optional NDI output (requires NDI SDK installed; build with --features ndi)
+# Using grafton-ndi 0.9.x API (PixelFormat/ScanType/VideoFrame builder, etc.)
+grafton-ndi = { version = "0.9", optional = true }
+
+[features]
+default = []
+ndi = ["dep:grafton-ndi"]
 
 [build-dependencies]
 cc = "1"

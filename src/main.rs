@@ -37,6 +37,7 @@ enum OutputMode {
     Syphon,
     Spout,
     Stream,
+    Ndi,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -52,6 +53,9 @@ struct OutputConfigFile {
 
     #[serde(default)]
     stream: StreamCfg,
+
+    #[serde(default)]
+    ndi: NdiCfg,
 
     #[serde(default)]
     hotkeys: HotkeysCfg,
@@ -141,6 +145,59 @@ impl Default for StreamCfg {
     }
 }
 
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct NdiCfg {
+    /// Master on/off for NDI output.
+    #[serde(default)]
+    enabled: bool,
+
+    /// NDI source name as seen by receivers (e.g. OBS).
+    #[serde(default)]
+    name: Option<String>,
+
+    /// Optional comma-separated NDI groups.
+    #[serde(default)]
+    groups: Option<String>,
+
+    /// Whether to clock video (recommended true).
+    #[serde(default = "default_true")]
+    clock_video: bool,
+
+    /// Frame rate numerator.
+    #[serde(default = "default_ndi_fps_n")]
+    fps_n: i32,
+
+    /// Frame rate denominator.
+    #[serde(default = "default_ndi_fps_d")]
+    fps_d: i32,
+
+    /// Apply a vertical flip (OpenGL readback is typically upside-down).
+    #[serde(default = "default_true")]
+    vflip: bool,
+}
+
+fn default_ndi_fps_n() -> i32 {
+    60
+}
+fn default_ndi_fps_d() -> i32 {
+    1
+}
+
+impl Default for NdiCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: None,
+            groups: None,
+            clock_video: true,
+            fps_n: default_ndi_fps_n(),
+            fps_d: default_ndi_fps_d(),
+            vflip: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SyphonCfg {
     #[serde(default = "default_true")]
@@ -172,6 +229,8 @@ struct HotkeysCfg {
     spout: Vec<String>,
     #[serde(default = "default_hotkeys_stream")]
     stream: Vec<String>,
+    #[serde(default = "default_hotkeys_ndi")]
+    ndi: Vec<String>,
 }
 
 fn default_hotkeys_texture() -> Vec<String> {
@@ -186,6 +245,9 @@ fn default_hotkeys_spout() -> Vec<String> {
 fn default_hotkeys_stream() -> Vec<String> {
     vec!["Digit4".into(), "Numpad4".into()]
 }
+fn default_hotkeys_ndi() -> Vec<String> {
+    vec!["Digit6".into(), "Numpad6".into()]
+}
 
 impl Default for HotkeysCfg {
     fn default() -> Self {
@@ -194,6 +256,7 @@ impl Default for HotkeysCfg {
             syphon: default_hotkeys_syphon(),
             spout: default_hotkeys_spout(),
             stream: default_hotkeys_stream(),
+            ndi: default_hotkeys_ndi(),
         }
     }
 }
@@ -251,6 +314,11 @@ fn build_hotkey_map(cfg: &HotkeysCfg) -> HashMap<KeyCode, OutputMode> {
             map.insert(code, OutputMode::Stream);
         }
     }
+    for k in &cfg.ndi {
+        if let Some(code) = parse_keycode(k) {
+            map.insert(code, OutputMode::Ndi);
+        }
+    }
     map
 }
 
@@ -286,6 +354,7 @@ fn load_output_config(path: &Path, default_mode: OutputMode) -> OutputConfigFile
         syphon: SyphonCfg::default(),
         spout: SpoutCfg::default(),
         stream: StreamCfg::default(),
+        ndi: NdiCfg::default(),
         hotkeys: HotkeysCfg::default(),
     };
 
@@ -773,7 +842,7 @@ impl StreamSender {
                 h,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut self.buf_rgba)),
+                glow::PixelPackData::Slice(Some(self.buf_rgba.as_mut_slice())),
             );
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
@@ -802,6 +871,298 @@ impl StreamSender {
 impl Drop for StreamSender {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+
+
+/// -------------------------------
+/// NDI output (optional, feature-gated)
+///
+/// Uses CPU readback (glReadPixels) and publishes frames as an NDI source for OBS.
+/// Build with: `cargo run --features ndi`
+///
+/// Notes:
+/// - We send BGRA (common NDI format). OpenGL readback gives RGBA, so we swizzle.
+/// - We optionally vflip because OpenGL readback is typically upside-down.
+/// -------------------------------
+
+#[cfg(feature = "ndi")]
+mod ndi_out {
+    use super::*;
+
+    use grafton_ndi::{
+        LineStrideOrSize, NDI, PixelFormat, ScanType, Sender, SenderOptions, VideoFrame,
+    };
+
+    enum NdiMsg {
+        Frame { bgra: Vec<u8>, w: i32, h: i32 },
+        Stop,
+    }
+
+    pub struct NdiSender {
+        cfg: NdiCfg,
+        w: i32,
+        h: i32,
+
+        // CPU buffers (reused)
+        buf_rgba: Vec<u8>,
+        buf_bgra: Vec<u8>,
+
+        tx: Option<mpsc::SyncSender<NdiMsg>>,
+        worker: Option<thread::JoinHandle<()>>,
+        last_send: Instant,
+        warned: bool,
+    }
+
+    impl NdiSender {
+        pub fn new(cfg: NdiCfg) -> Self {
+            Self {
+                cfg,
+                w: 0,
+                h: 0,
+                buf_rgba: Vec::new(),
+                buf_bgra: Vec::new(),
+                tx: None,
+                worker: None,
+                last_send: Instant::now(),
+                warned: false,
+            }
+        }
+
+        pub fn is_enabled(&self) -> bool {
+            self.cfg.enabled
+        }
+
+        fn fps_f64(&self) -> f64 {
+            let n = self.cfg.fps_n.max(1) as f64;
+            let d = self.cfg.fps_d.max(1) as f64;
+            n / d
+        }
+
+        pub fn ensure_running(&mut self, w: i32, h: i32) {
+            if !self.cfg.enabled {
+                self.stop();
+                return;
+            }
+
+            let needs_restart = self.tx.is_none() || self.w != w || self.h != h;
+            if !needs_restart {
+                return;
+            }
+
+            self.stop();
+            self.w = w;
+            self.h = h;
+
+            let bytes = (w.max(1) as usize) * (h.max(1) as usize) * 4;
+            self.buf_rgba.resize(bytes, 0);
+            self.buf_bgra.resize(bytes, 0);
+
+            let (tx, rx) = mpsc::sync_channel::<NdiMsg>(2);
+
+            let cfg = self.cfg.clone();
+            let name = cfg
+                .name
+                .clone()
+                .unwrap_or_else(|| "shadecore".to_string());
+            let groups = cfg.groups.clone();
+            let w0 = w;
+            let h0 = h;
+
+            let handle = thread::spawn(move || {
+                let ndi = match NDI::new() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[ndi] Failed to init NDI: {e:?}");
+                        return;
+                    }
+                };
+
+                let mut builder = SenderOptions::builder(&name);
+                if let Some(g) = groups.as_deref() {
+                    builder = builder.groups(g);
+                }
+                builder = builder.clock_video(cfg.clock_video);
+                let opts = builder.build();
+
+                let sender = match Sender::new(&ndi, &opts) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ndi] Failed to create sender: {e:?}");
+                        return;
+                    }
+                };
+
+                println!("[ndi] Sender started: {}", name);
+                println!("[ndi] Enabled. Receiver: OBS via DistroAV/OBS-NDI should see source \"{}\".", name);
+
+                // Pre-build a frame shell we can reuse and just swap data/stride each time.
+                // We'll still rebuild if resolution changes (it shouldn't while running).
+                let mut frame_shell = VideoFrame::builder()
+                    .resolution(w0, h0)
+                    .pixel_format(PixelFormat::BGRA)
+                    .frame_rate(cfg.fps_n.max(1), cfg.fps_d.max(1))
+                    .aspect_ratio((w0 as f32) / (h0.max(1) as f32))
+                    .scan_type(ScanType::Progressive)
+                    .build()
+                    .expect("VideoFrame::build failed");
+
+                loop {
+                    match rx.recv() {
+                        Ok(NdiMsg::Frame { bgra, w, h }) => {
+                            if w != frame_shell.width || h != frame_shell.height {
+                                // Should not happen with our restart logic, but be safe.
+                                frame_shell = VideoFrame::builder()
+                                    .resolution(w, h)
+                                    .pixel_format(PixelFormat::BGRA)
+                                    .frame_rate(cfg.fps_n.max(1), cfg.fps_d.max(1))
+                                    .aspect_ratio((w as f32) / (h.max(1) as f32))
+                                    .scan_type(ScanType::Progressive)
+                                    .build()
+                                    .expect("VideoFrame::build failed");
+                            }
+
+                            frame_shell.data = bgra;
+                            frame_shell.line_stride_or_size =
+                                LineStrideOrSize::LineStrideBytes(w.saturating_mul(4));
+                            sender.send_video(&frame_shell);
+                        }
+                        Ok(NdiMsg::Stop) | Err(_) => break,
+                    }
+                }
+
+                println!("[ndi] Sender stopped");
+            });
+
+            self.tx = Some(tx);
+            self.worker = Some(handle);
+            self.warned = false;
+            self.last_send = Instant::now();
+        }
+
+        fn rgba_to_bgra(&mut self, w: i32, h: i32) {
+            let w = w.max(1) as usize;
+            let h = h.max(1) as usize;
+            let n = w * h;
+            let src = &self.buf_rgba;
+            let dst = &mut self.buf_bgra;
+
+            for i in 0..n {
+                let si = i * 4;
+                let r = src[si + 0];
+                let g = src[si + 1];
+                let b = src[si + 2];
+                let a = src[si + 3];
+                dst[si + 0] = b;
+                dst[si + 1] = g;
+                dst[si + 2] = r;
+                dst[si + 3] = a;
+            }
+        }
+
+        fn vflip_inplace(buf: &mut [u8], w: i32, h: i32) {
+            let w = w.max(1) as usize;
+            let h = h.max(1) as usize;
+            let row = w * 4;
+            for y in 0..(h / 2) {
+                let a0 = y * row;
+                let b0 = (h - 1 - y) * row;
+                for x in 0..row {
+                    buf.swap(a0 + x, b0 + x);
+                }
+            }
+        }
+
+        pub fn send_current_fbo_frame(
+            &mut self,
+            gl: &glow::Context,
+            fbo: glow::NativeFramebuffer,
+            w: i32,
+            h: i32,
+        ) {
+            if !self.cfg.enabled {
+                return;
+            }
+
+            self.ensure_running(w, h);
+            let Some(tx0) = self.tx.as_ref() else { return; };
+            let tx = tx0.clone();
+
+            // simple rate-limit
+            let target_dt = Duration::from_secs_f64(1.0 / self.fps_f64().max(1.0));
+            if self.last_send.elapsed() < target_dt {
+                return;
+            }
+            self.last_send = Instant::now();
+
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+                gl.read_pixels(
+                    0,
+                    0,
+                    w,
+                    h,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    // glow 0.16 expects an Option<&mut [u8]> here.
+                    glow::PixelPackData::Slice(Some(self.buf_rgba.as_mut_slice())),
+                );
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            }
+
+            if self.cfg.vflip {
+                Self::vflip_inplace(&mut self.buf_rgba, w, h);
+            }
+
+            self.rgba_to_bgra(w, h);
+
+            // Copy out for the worker (bounded channel keeps it from piling up).
+            let frame = self.buf_bgra.clone();
+            if tx.try_send(NdiMsg::Frame { bgra: frame, w, h }).is_err() && !self.warned {
+                self.warned = true;
+                eprintln!("[ndi] Dropping frames (sender busy). Consider lowering fps or resolution.");
+            }
+        }
+
+        pub fn stop(&mut self) {
+            if let Some(tx) = self.tx.take() {
+                let _ = tx.try_send(NdiMsg::Stop);
+            }
+            if let Some(h) = self.worker.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    impl Drop for NdiSender {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+}
+
+#[cfg(not(feature = "ndi"))]
+mod ndi_out {
+    use super::*;
+
+    pub struct NdiSender;
+    impl NdiSender {
+        pub fn new(_cfg: NdiCfg) -> Self {
+            Self
+        }
+        pub fn is_enabled(&self) -> bool {
+            false
+        }
+        pub fn send_current_fbo_frame(
+            &mut self,
+            _gl: &glow::Context,
+            _fbo: glow::NativeFramebuffer,
+            _w: i32,
+            _h: i32,
+        ) {
+        }
+        pub fn stop(&mut self) {}
     }
 }
 
@@ -1134,12 +1495,19 @@ fn main() {
 
     let stream_cfg = output_cfg.stream.clone();
     let stream_enabled = stream_cfg.enabled;
+
+    let ndi_cfg = output_cfg.ndi.clone();
+    let ndi_enabled = ndi_cfg.enabled;
+    let ndi_name = ndi_cfg
+        .name
+        .clone()
+        .unwrap_or_else(|| "shadecore".to_string());
     let hotkey_map = build_hotkey_map(&output_cfg.hotkeys);
 
     let mut output_mode = output_cfg.output_mode;
 
     println!(
-        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?}",
+        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?} | ndi.enabled={} name='{}'",
         output_mode,
         syphon_enabled,
         syphon_name,
@@ -1147,7 +1515,9 @@ fn main() {
         spout_name,
         spout_invert,
         stream_enabled,
-        stream_cfg.target
+        stream_cfg.target,
+        ndi_enabled,
+        ndi_name
     );
 
     println!(
@@ -1162,8 +1532,19 @@ fn main() {
         stream_cfg.vflip
     );
 
+    println!(
+        "[output] ndi.enabled={} name='{}' groups={:?} fps={}/{} clock_video={} vflip={}",
+        ndi_enabled,
+        ndi_name,
+        ndi_cfg.groups,
+        ndi_cfg.fps_n,
+        ndi_cfg.fps_d,
+        ndi_cfg.clock_video,
+        ndi_cfg.vflip
+    );
+
     window.set_title(&format!(
-        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream)",
+        "shadecore - output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream, 6=NDI)",
         output_mode
     ));
 
@@ -1178,6 +1559,7 @@ fn main() {
     let mut spout: Option<SpoutSender> = None;
 
     let mut stream = StreamSender::new(stream_cfg.clone());
+    let mut ndi = ndi_out::NdiSender::new(ndi_cfg.clone());
 
     let mut warned = false;
     let start = Instant::now();
@@ -1199,11 +1581,14 @@ fn main() {
                                     if output_mode == OutputMode::Stream && m != OutputMode::Stream {
                                         stream.stop();
                                     }
+                                    if output_mode == OutputMode::Ndi && m != OutputMode::Ndi {
+                                        ndi.stop();
+                                    }
                                     output_mode = m;
                                     warned = false;
                                     println!("[output] switched -> {:?}", output_mode);
                                     window.set_title(&format!(
-                                        "shadecore – output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream)",
+                                        "shadecore - output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream, 6=NDI)",
                                         output_mode
                                     ));
                                 }
@@ -1267,6 +1652,18 @@ fn main() {
                                     }
                                 } else {
                                     stream.send_current_fbo_frame(&gl, rt.fbo, w, h);
+                                }
+                            }
+
+
+                            OutputMode::Ndi => {
+                                if !ndi.is_enabled() {
+                                    if !warned {
+                                        println!("[output] NDI requested but disabled in output.json (or built without --features ndi). Falling back to Texture.");
+                                        warned = true;
+                                    }
+                                } else {
+                                    ndi.send_current_fbo_frame(&gl, rt.fbo, w, h);
                                 }
                             }
 

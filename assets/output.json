@@ -21,9 +21,34 @@
         "ffmpeg_path": null
     },
     "hotkeys": {
-        "texture": ["Digit1", "Numpad1"],
-        "syphon": ["Digit2", "Numpad2"],
-        "spout": ["Digit3", "Numpad3"],
-        "stream": ["Digit4", "Numpad4"]
+        "texture": [
+            "Digit1",
+            "Numpad1"
+        ],
+        "syphon": [
+            "Digit2",
+            "Numpad2"
+        ],
+        "spout": [
+            "Digit3",
+            "Numpad3"
+        ],
+        "stream": [
+            "Digit4",
+            "Numpad4"
+        ],
+        "ndi": [
+            "Digit6",
+            "Numpad6"
+        ]
+    },
+    "ndi": {
+        "enabled": true,
+        "name": "shadecore",
+        "groups": null,
+        "clock_video": true,
+        "fps_n": 60,
+        "fps_d": 1,
+        "vflip": true
     }
 }
