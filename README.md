@@ -2,38 +2,49 @@
   <img width="45%" height="45%" src="https://github.com/schwwaaa/shadecore/blob/main/media/shadecore-logo.png?raw=true"/>  
 </p>
 
-<p align="center"><em>A native, high‑performance GLSL rendering engine written in Rust, designed for real‑time shader experimentation, MIDI control, and live video routing.</em></p> 
+<p align="center"><em>A native, high-performance GLSL rendering engine written in Rust, designed for real-time shader experimentation, hardware control, and live video routing.</em></p>
 
 ---
 
 ## Description
 
-`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and can route the output as:
+`shadecore` is a **standalone OpenGL shader engine** that renders a fullscreen GLSL fragment shader and routes the result to multiple real-time video outputs.
 
-- local window preview (FBO texture)
+Supported outputs:
+
+- Local window preview (always on)
 - **Syphon** (macOS)
 - **Spout2** (Windows)
-- **Stream** via FFmpeg (RTSP for local network; RTMP for platforms)
+- **FFmpeg streaming** (RTSP / RTMP)
+- **NDI** (separate execution mode)
 
-It is designed to be:
-- fast enough for feedback systems,
-- deterministic enough for installations,
-- flexible enough to act as a base for many future tools.
+The engine is intentionally **low-level and explicit**:
 
-There is **no GUI framework**, **no WebView**, and **no runtime abstraction layer** between your shader and the GPU.
+- No GUI framework  
+- No WebView  
+- No runtime abstraction layer between your shader and the GPU  
+
+What you write in GLSL is what runs.
 
 ---
 
 ## Purpose
 
-This project exists to solve a common problem in creative coding:
+This project exists to solve a common creative-coding problem:
 
 > *“I want to build my own visual tools without shipping an entire framework.”*
 
-`shadecore` is intended to be:
-- a **foundation** for custom shader‑based applications,
+`shadecore` is designed to be:
+
+- a **foundation** for custom shader-based tools,
 - a **bridge** between GLSL and external control systems,
-- a **standalone binary** rather than a patch inside another tool.
+- a **standalone binary**, not a plugin locked into another host.
+
+It is equally suited for:
+- live performance,
+- installations,
+- research tools,
+- experimental pipelines.
 
 ---
 
@@ -41,12 +52,13 @@ This project exists to solve a common problem in creative coding:
 
 - Native OpenGL rendering (via `glow`)
 - Fullscreen GLSL fragment shader pipeline
-- MIDI parameter control (CoreMIDI)
-- JSON‑defined parameter schema
-- Syphon server output (macOS)
-- Spout2 sender output (Windows)
-- FFmpeg streaming output (RTSP/RTMP)
-- Vendored framework dependencies (no system installs for Syphon/Spout)
+- JSON-defined parameter schema
+- MIDI control (CoreMIDI on macOS, cross-platform via `midir`)
+- **Syphon server output** (macOS)
+- **Spout2 sender output** (Windows)
+- **FFmpeg streaming output** (RTSP / RTMP)
+- **NDI output (separate run mode)**
+- Vendored native dependencies (no system installs required)
 - Deterministic build & runtime behavior
 
 ---
@@ -54,50 +66,116 @@ This project exists to solve a common problem in creative coding:
 ## Running the Project
 
 ### Requirements
-- macOS or Windows (Linux builds for local preview are possible)
-- Rust (stable)
 
-Platform extras:
-- macOS: Xcode Command Line Tools (Syphon.framework is vendored)
-- Windows: Visual Studio Build Tools (Spout2 is vendored)
-- Streaming: FFmpeg available in PATH, or set `stream.ffmpeg_path` in `assets/output*.json`
+- macOS or Windows  
+- Rust (stable toolchain)
 
-### Build & Run
+Platform-specific:
+
+- **macOS**
+  - Xcode Command Line Tools
+  - Syphon.framework is vendored (no install required)
+- **Windows**
+  - Visual Studio Build Tools (C++ workload)
+  - Spout2 is vendored
+- **Streaming**
+  - FFmpeg available in `PATH`
+  - or set `stream.ffmpeg_path` in `assets/output*.json`
+
+---
+
+## Build & Run (Standard Engine)
 
 ```bash
 cargo run
 ```
 
 This will:
-- compile the engine
-- launch the renderer
-- load defaults from `assets/params.json` and `assets/output.json`
-- show a local preview window (always)
 
-Switch outputs at runtime (defaults, configurable in `assets/output*.json`):
-- `1` = Texture (preview only)
-- `2` = Syphon (macOS)
-- `3` = Spout2 (Windows)
-- `4` = Stream (FFmpeg RTSP/RTMP)
+- compile the engine
+- launch the OpenGL renderer
+- load:
+  - `assets/params.json`
+  - `assets/output.json`
+- open a local preview window (**always active**)
+
+---
+
+## Output Routing
+
+Output behavior is controlled by `assets/output.json` (or alternate output configs).
+
+### Runtime Hotkeys (default)
+
+- `1` — Texture only (preview)
+- `2` — Syphon (macOS)
+- `3` — Spout2 (Windows)
+- `4` — Stream (FFmpeg RTSP / RTMP)
+- `6` — NDI (see below)
+
+Hotkeys are configurable in the output JSON.
+
+---
+
+## ⚠️ NDI Output (Important)
+
+NDI is **not enabled in the default execution path**.
+
+This is intentional.
+
+### Why NDI Is Separate
+
+NDI requires:
+- a different runtime lifecycle,
+- different threading assumptions,
+- tighter timing guarantees.
+
+Rather than complicate the core render loop, NDI runs in a **dedicated execution mode**.
+
+### Running with NDI
+
+```bash
+cargo run --features ndi
+```
+
+or
+
+```bash
+cargo run --bin shadecore-ndi
+```
+
+Check `Cargo.toml` for the active NDI configuration.
+
+### NDI Notes
+
+- NDI output is discoverable by OBS, Resolume, and other NDI-capable software
+- Local preview still runs unless explicitly disabled
+- NDI uses its own output configuration file
+
+This separation is **by design**, not a limitation.
+
 ---
 
 ## Project Structure
 
-```
+```text
 shadecore/
 ├─ src/
 │  └─ main.rs              # Core engine loop
 ├─ native/
-│  ├─ spout_bridge/         # C++ Spout2 bridge (Windows)
-│  ├─ syphon_bridge.m      # Objective‑C Syphon bridge
+│  ├─ spout_bridge/        # C++ Spout2 bridge (Windows)
+│  ├─ syphon_bridge.m      # Objective-C Syphon bridge (macOS)
 │  └─ syphon_bridge.h
 ├─ vendor/
-│  └─ Syphon.framework     # Vendored framework
+│  └─ Syphon.framework     # Vendored macOS framework
 ├─ assets/
-│  ├─ params.json          # Parameter & MIDI schema
-│  ├─ output.json          # Output routing (mode, hotkeys, stream settings)
-│  └─ shaders/             # default.frag / present.frag
-├─ build.rs                # Framework linking + rpath logic
+│  ├─ params.json          # Parameters + MIDI schema
+│  ├─ output.json          # Output routing & hotkeys
+│  ├─ output_ndi.json      # NDI-specific configuration
+│  └─ shaders/
+│     ├─ default.frag
+│     └─ present.frag
+├─ build.rs                # Native linking & platform logic
 └─ Cargo.toml
 ```
 
@@ -106,47 +184,53 @@ shadecore/
 ## Dependencies
 
 ### Rust Crates
-- `glow` – OpenGL bindings
-- `winit` / `glutin` – window + context
-- `midir` – MIDI input
-- `serde` / `serde_json` – parameter parsing
 
-### Native Frameworks
+- `glow` — OpenGL bindings
+- `winit` / `glutin` — windowing + GL context
+- `midir` — MIDI input
+- `serde` / `serde_json` — configuration parsing
+
+### Native APIs
+
 - OpenGL
-- Cocoa / AppKit
+- Cocoa / AppKit (macOS)
 - CoreMIDI
-- **Syphon** (vendored)
+- Syphon (vendored)
+- Spout2 (vendored)
 
 ---
 
 ## How It Works
 
 ### 1. OpenGL Rendering
-- A window and OpenGL context are created using `winit` + `glutin`
-- A fullscreen triangle is drawn every frame
-- The fragment shader is responsible for all visual output
+
+- A window and GL context are created with `winit` + `glutin`
+- A fullscreen triangle is rendered every frame
+- All visuals are produced in the fragment shader
 
 ### 2. Shader Uniforms
-The engine provides:
-- `u_time` – seconds since start
-- `u_resolution` – window size in pixels
-- user‑defined parameters (from JSON + MIDI)
+
+Built-in uniforms:
+
+- `u_time` — seconds since start
+- `u_resolution` — framebuffer resolution
+
+Plus:
+- user-defined parameters from JSON
+- live-updated MIDI values
 
 ### 3. Render Target
+
 - Rendering occurs into an offscreen framebuffer
 - The framebuffer texture is:
-  - drawn to the window
-  - published to Syphon
-
-### 4. Syphon Publishing
-- The OpenGL texture ID is passed to Syphon
-- Other apps can receive frames in real time
+  - drawn to the preview window
+  - shared with Syphon, Spout, Stream, or NDI depending on mode
 
 ---
 
 ## Parameters & MIDI
 
-Parameters are defined in a JSON file:
+Parameters are defined declaratively in JSON.
 
 ```json
 {
@@ -164,11 +248,14 @@ Parameters are defined in a JSON file:
 }
 ```
 
-- MIDI CC values (0–127) are normalized
-- Values are scaled into parameter ranges
-- Parameters are updated every frame
+Behavior:
 
-This makes controller layouts reproducible and portable.
+- MIDI CC values (0–127) are normalized
+- Values are mapped into parameter ranges
+- Parameters update every frame
+- No hidden smoothing or automation
+
+Controller layouts are portable and reproducible.
 
 ---
 
@@ -176,28 +263,30 @@ This makes controller layouts reproducible and portable.
 
 - Live shader performance
 - Visual instruments
-- Generative art installations
-- Feedback‑based video systems
-- Custom tools for OBS / Resolume / TouchDesigner pipelines
+- Generative installations
+- Feedback-based video systems
+- Custom GPU tools for OBS, Resolume, TouchDesigner pipelines
 
 ---
 
 ## Roadmap
 
-- Hot‑loading shaders from disk
-- Multi‑pass rendering / feedback buffers
-- `.app` bundling
-- Windows backend (Spout)
+- Shader hot-reloading
+- Multi-pass rendering / feedback buffers
+- `.app` / `.exe` packaging
 - OSC / network control
+- Expanded NDI configuration options
 
 ---
 
 ## Philosophy
 
-This tool is intentionally **minimal and explicit**.
+`shadecore` is intentionally **minimal, explicit, and opinionated**.
 
-Instead of abstracting creativity behind interfaces,  
-`shadecore` gives you **direct control of the GPU** and lets you decide what the software should become.
+It does not try to be a framework.  
+It does not hide the GPU.  
+
+It exists to give you **direct ownership of the rendering pipeline** and let the software grow into whatever tool you need.
 
 ---
 
