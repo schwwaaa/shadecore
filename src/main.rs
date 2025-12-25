@@ -42,6 +42,94 @@ enum OutputMode {
     Ndi,
 }
 
+/// Preview scaling configuration (presentation only; does NOT affect recording/FBO)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PreviewScaleMode {
+    Fit,
+    Fill,
+    Stretch,
+    Pixel,
+}
+
+impl PreviewScaleMode {
+    fn as_i32(self) -> i32 {
+        match self {
+            PreviewScaleMode::Fit => 0,
+            PreviewScaleMode::Fill => 1,
+            PreviewScaleMode::Stretch => 2,
+            PreviewScaleMode::Pixel => 3,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            PreviewScaleMode::Fit => "fit",
+            PreviewScaleMode::Fill => "fill",
+            PreviewScaleMode::Stretch => "stretch",
+            PreviewScaleMode::Pixel => "pixel",
+        }
+    }
+}
+
+fn default_preview_scale_mode() -> PreviewScaleMode {
+    PreviewScaleMode::Fit
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PreviewHotkeysCfg {
+    #[serde(default = "default_preview_hotkeys_fit")]
+    fit: Vec<String>,
+    #[serde(default = "default_preview_hotkeys_fill")]
+    fill: Vec<String>,
+    #[serde(default = "default_preview_hotkeys_stretch")]
+    stretch: Vec<String>,
+    #[serde(default = "default_preview_hotkeys_pixel")]
+    pixel: Vec<String>,
+}
+
+fn default_preview_hotkeys_fit() -> Vec<String> {
+    vec!["Digit7".into(), "Numpad7".into()]
+}
+fn default_preview_hotkeys_fill() -> Vec<String> {
+    vec!["Digit8".into(), "Numpad8".into()]
+}
+fn default_preview_hotkeys_stretch() -> Vec<String> {
+    vec!["Digit9".into(), "Numpad9".into()]
+}
+fn default_preview_hotkeys_pixel() -> Vec<String> {
+    vec!["Digit0".into(), "Numpad0".into()]
+}
+
+impl Default for PreviewHotkeysCfg {
+    fn default() -> Self {
+        Self {
+            fit: default_preview_hotkeys_fit(),
+            fill: default_preview_hotkeys_fill(),
+            stretch: default_preview_hotkeys_stretch(),
+            pixel: default_preview_hotkeys_pixel(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PreviewCfg {
+    #[serde(default = "default_preview_scale_mode")]
+    scale_mode: PreviewScaleMode,
+
+    #[serde(default)]
+    hotkeys: PreviewHotkeysCfg,
+}
+
+impl Default for PreviewCfg {
+    fn default() -> Self {
+        Self {
+            scale_mode: default_preview_scale_mode(),
+            hotkeys: PreviewHotkeysCfg::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct OutputConfigFile {
     #[serde(default = "default_output_mode")]
@@ -61,6 +149,9 @@ struct OutputConfigFile {
 
     #[serde(default)]
     hotkeys: HotkeysCfg,
+
+    #[serde(default)]
+    preview: PreviewCfg,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -263,6 +354,16 @@ impl Default for HotkeysCfg {
     }
 }
 
+fn preview_scale_mode_name(mode: i32) -> &'static str {
+    match mode {
+        0 => "FIT",
+        1 => "FILL",
+        2 => "STRETCH",
+        3 => "PIXEL",
+        _ => "UNKNOWN",
+    }
+}
+
 fn parse_keycode(name: &str) -> Option<KeyCode> {
     match name {
         "Digit0" => Some(KeyCode::Digit0),
@@ -338,6 +439,23 @@ fn build_hotkey_map(cfg: &HotkeysCfg) -> HashMap<KeyCode, OutputMode> {
     }
     map
 }
+
+fn build_preview_hotkey_map(cfg: &PreviewHotkeysCfg) -> HashMap<KeyCode, i32> {
+    let mut map = HashMap::new();
+    let mut insert_keys = |keys: &Vec<String>, mode: PreviewScaleMode| {
+        for name in keys {
+            if let Some(code) = parse_keycode(name) {
+                map.insert(code, mode.as_i32());
+            }
+        }
+    };
+    insert_keys(&cfg.fit, PreviewScaleMode::Fit);
+    insert_keys(&cfg.fill, PreviewScaleMode::Fill);
+    insert_keys(&cfg.stretch, PreviewScaleMode::Stretch);
+    insert_keys(&cfg.pixel, PreviewScaleMode::Pixel);
+    map
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecHotkeyAction {
@@ -653,6 +771,7 @@ fn load_output_config(path: &Path, default_mode: OutputMode) -> OutputConfigFile
         stream: StreamCfg::default(),
         ndi: NdiCfg::default(),
         hotkeys: HotkeysCfg::default(),
+        preview: PreviewCfg::default(),
     };
 
     let data = match std::fs::read_to_string(path) {
@@ -2484,15 +2603,17 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         .clone()
         .unwrap_or_else(|| "shadecore".to_string());
     let hotkey_map = build_hotkey_map(&output_cfg.hotkeys);
+    let preview_hotkey_map = build_preview_hotkey_map(&output_cfg.preview.hotkeys);
 
     let mut output_mode = output_cfg.output_mode;
 
     // Preview scaling mode (presentation only; does NOT affect recording/FBO size)
     // 0=fit (letterbox), 1=fill (crop), 2=stretch, 3=pixel (1:1 centered)
-    let mut preview_scale_mode: i32 = 0;
+    let mut preview_scale_mode: i32 = output_cfg.preview.scale_mode.as_i32();
+    println!("[preview] initial scale_mode: {} (mode={})", preview_scale_mode_name(preview_scale_mode), preview_scale_mode);
 
     println!(
-        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?} | ndi.enabled={} name='{}'",
+        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?} | ndi.enabled={} name='{}' | preview.scale_mode={}",
         output_mode,
         syphon_enabled,
         syphon_name,
@@ -2502,7 +2623,8 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         stream_enabled,
         stream_cfg.target,
         ndi_enabled,
-        ndi_name
+        ndi_name,
+        output_cfg.preview.scale_mode.as_str()
     );
 
     println!(
@@ -2580,12 +2702,10 @@ let mut stream = StreamSender::new(stream_cfg.clone());
                                         WindowEvent::KeyboardInput { event, .. } => {
                         if event.state.is_pressed() && !event.repeat {
                             if let PhysicalKey::Code(code) = event.physical_key {
-	                                // Global key logging for debugging hotkey routing & conflicts.
-	                                println!("[input] key pressed: {:?}", code);
+                                println!("[key] pressed: {:?}", code);
 
                                 // --- Profile hotkeys (params.json) ---
-	                                if let Some(pact) = profile_hotkeys.get(&code).cloned() {
-	                                    println!("[params] hotkey: {:?} -> {:?}", code, pact);
+                                if let Some(pact) = profile_hotkeys.get(&code).cloned() {
                                     if profile_names.is_empty() {
                                         println!("[params] no profiles defined");
                                     } else {
@@ -2706,14 +2826,13 @@ if let Some(action) = recording_hotkeys.get(&code).copied() {
                                     return;
                                 }
 
-	                                let new_mode = hotkey_map.get(&code).copied();
+                                let new_mode = hotkey_map.get(&code).copied();
                                 if let Some(m) = new_mode {
-	                                    println!("[output] hotkey pressed: {:?} -> {:?}", code, m);
                                     if output_mode == OutputMode::Stream && m != OutputMode::Stream { stream.stop(); }
                                     if output_mode == OutputMode::Ndi && m != OutputMode::Ndi { ndi.stop(); }
                                     output_mode = m;
                                     warned = false;
-	                                    println!("[output] switched -> {:?}", output_mode);
+                                    println!("[output] switched -> {:?}", output_mode);
                                     window.set_title(&format!(
                                         "shadecore - output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream, 6=NDI)",
                                         output_mode
@@ -2722,27 +2841,21 @@ if let Some(action) = recording_hotkeys.get(&code).copied() {
                             }
 
 
-                            // --- Preview scaling hotkeys (presentation only) ---
-                            // Uses 7/8/9/0 (digit or numpad) to avoid clashing with output hotkeys.
-                            // 7=FIT, 8=FILL, 9=STRETCH, 0=PIXEL (1:1 centered)
-                            let new_preview_mode: Option<i32> = match event.physical_key {
-                                PhysicalKey::Code(KeyCode::Digit7) | PhysicalKey::Code(KeyCode::Numpad7) => Some(0),
-                                PhysicalKey::Code(KeyCode::Digit8) | PhysicalKey::Code(KeyCode::Numpad8) => Some(1),
-                                PhysicalKey::Code(KeyCode::Digit9) | PhysicalKey::Code(KeyCode::Numpad9) => Some(2),
-                                PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => Some(3),
-                                _ => None,
-                            };
-
-	                            if let Some(pm) = new_preview_mode {
-                                if pm != preview_scale_mode {
-                                    preview_scale_mode = pm;
-	                                    println!(
-	                                        "[preview] hotkey pressed: {:?} -> scale_mode={} (0=fit, 1=fill, 2=stretch, 3=pixel)",
-	                                        event.physical_key,
-	                                        preview_scale_mode
-	                                    );
-                                }
-                            }
+// --- Preview scaling hotkeys (presentation only; JSON-configurable) ---
+if let PhysicalKey::Code(code) = event.physical_key {
+    if let Some(pm) = preview_hotkey_map.get(&code).copied() {
+        if pm != preview_scale_mode {
+            preview_scale_mode = pm;
+            let name = preview_scale_mode_name(preview_scale_mode);
+            println!(
+                "[preview] hotkey pressed: {:?} -> {} (mode={})",
+                code,
+                name,
+                preview_scale_mode
+            );
+        }
+    }
+}
                         }
                     }
 

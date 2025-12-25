@@ -48,5 +48,26 @@
         "fps_n": 60,
         "fps_d": 1,
         "vflip": true
+    },
+    "preview": {
+        "scale_mode": "fit",
+        "hotkeys": {
+            "fit": [
+                "Digit7",
+                "Numpad7"
+            ],
+            "fill": [
+                "Digit8",
+                "Numpad8"
+            ],
+            "stretch": [
+                "Digit9",
+                "Numpad9"
+            ],
+            "pixel": [
+                "Digit0",
+                "Numpad0"
+            ]
+        }
     }
 }
