@@ -1,17 +1,19 @@
+//! Preview presenter
+//!
+//! The presenter is intentionally separated from the renderer:
+//! - The renderer draws into an offscreen texture at the *authoritative* resolution.
+//! - The presenter decides how that texture appears in the local window (scaling / letterboxing).
+//!
+//! This keeps "preview UX" changes (e.g. fit/fill, showing debug overlays, headless mode) from
+//! spilling into the core rendering path or output backends.
+//!
 use glow::HasContext;
-
-/// Presentation-only preview renderer.
-///
-/// ShadeCore always renders into an offscreen framebuffer (FBO) whose dimensions are
-/// authoritative (e.g. recording.json). The preview window simply *presents* that texture
-/// and may scale it to fit the window.
-///
-/// This module keeps "preview" behavior modular so headless/installation mode can
-/// swap in a no-op presenter without interweaving conditional logic throughout the render loop.
 
 #[derive(Debug)]
 pub enum Presenter {
+    /// Uses a real window surface to present frames (normal interactive mode).
     Window(WindowPresenter),
+    /// Does not present anything (useful for headless output/record-only runs).
     Null(NullPresenter),
 }
 

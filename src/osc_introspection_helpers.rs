@@ -1,24 +1,26 @@
-// ShadeCore OSC introspection helpers (drop-in)
-//
-// Add these helpers near your OSC handler, and update your OSC receive loop to
-// keep the sender address (from) and pass `&sock` + `from` into handle_packet.
-//
-// Supported query messages (assumes prefix "/shadecore"):
-//   /shadecore/list/params
-//   /shadecore/get/<param>
-//   /shadecore/list/mappings
-//
-// Replies are sent back to the sender as OSC messages:
-//   /shadecore/reply/list/params   (string args: param names)
-//   /shadecore/reply/get/<param>   (float args: cur, tgt, min, max, smooth) OR ("unknown_param")
-//   /shadecore/reply/list/mappings (string args: patterns)
-//
-// NOTE: This is intentionally "modular" and does not assume anything about your
-// OSC mappings schema. It always exposes the direct routes:
-//   /prefix/param/<name> (normalized 0..1)
-//   /prefix/raw/<name>   (raw)
-// and your introspection endpoints.
-
+//! OSC introspection helpers (optional)
+//!
+//! These helpers implement *read-only* OSC endpoints that let external controllers discover:
+//! - available parameter names
+//! - parameter metadata (cur/target/min/max/smooth)
+//! - MIDI mapping patterns
+//!
+//! The intent is to make ShadeCore play nicely with TouchOSC / Max / custom controllers where you
+//! want to build UI dynamically rather than hard-coding parameter lists.
+//!
+//! ## Expected OSC namespace
+//! The code assumes a prefix like `/shadecore` (configurable in your OSC runtime).
+//!
+//! Queries:
+//! - `/shadecore/list/params`
+//! - `/shadecore/get/<param>`
+//! - `/shadecore/list/mappings`
+//!
+//! Replies:
+//! - `/shadecore/reply/list/params`   (string args: param names)
+//! - `/shadecore/reply/get/<param>`   (float args: cur, tgt, min, max, smooth) OR ("unknown_param")
+//! - `/shadecore/reply/list/mappings` (string args: patterns)
+//!
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::net::UdpSocket;
@@ -26,13 +28,14 @@ use std::net::UdpSocket;
 use rosc::{OscMessage, OscPacket, OscType};
 
 use crate::ParamStore;
+use crate::{logi, logw, loge};
 
 fn osc_send_reply(sock: &UdpSocket, to: SocketAddr, addr: String, args: Vec<OscType>) {
     let msg = OscMessage { addr, args };
     let pkt = OscPacket::Message(msg);
     match rosc::encoder::encode(&pkt) {
         Ok(buf) => { let _ = sock.send_to(&buf, to); }
-        Err(e) => { println!("[osc] encode error: {e}"); }
+        Err(e) => { logi!("OSC", "encode error: {e}");}
     }
 }
 
@@ -51,8 +54,7 @@ pub fn osc_try_introspect(
             names.sort();
             let args = names.into_iter().map(OscType::String).collect::<Vec<_>>();
             osc_send_reply(sock, to, format!("{}/reply/list/params", prefix), args);
-            println!("[osc] introspect list/params -> {} items", s.values.len());
-        }
+            logi!("OSC", "introspect list/params -> {} items", s.values.len());}
         return true;
     }
 
@@ -76,16 +78,14 @@ pub fn osc_try_introspect(
                         OscType::Float(sm),
                     ],
                 );
-                println!("[osc] introspect get/{name} cur={cur} tgt={tgt} range=({mn},{mx}) smooth={sm}");
-            } else {
+                logi!("OSC", "introspect get/{name} cur={cur} tgt={tgt} range=({mn},{mx}) smooth={sm}");} else {
                 osc_send_reply(
                     sock,
                     to,
                     format!("{}/reply/get/{}", prefix, name),
                     vec![OscType::String("unknown_param".into())],
                 );
-                println!("[osc] introspect get/{name} -> unknown_param");
-            }
+                logi!("OSC", "introspect get/{name} -> unknown_param");}
         }
         return true;
     }
@@ -100,8 +100,7 @@ pub fn osc_try_introspect(
             OscType::String(format!("{}/get/<name>", prefix)),
         ];
         osc_send_reply(sock, to, format!("{}/reply/list/mappings", prefix), args);
-        println!("[osc] introspect list/mappings");
-        return true;
+        logi!("OSC", "introspect list/mappings");return true;
     }
 
     false

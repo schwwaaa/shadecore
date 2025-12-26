@@ -1,3 +1,52 @@
+//! # ShadeCore engine (single-binary architecture)
+//! 
+//! This crate is intentionally "flat" (a small number of modules) so it can be read top-to-bottom
+//! without jumping through a large abstraction tree.
+//!
+//! ## Mental model
+//! - **Render target**: ShadeCore renders every frame into an offscreen framebuffer (FBO). That texture is the
+//!   *source of truth* for everything else (preview + Syphon/Spout/NDI/Stream + recording).
+//! - **Preview**: The window is only a *presenter* of the render texture. It may scale to fit the window and does
+//!   not define output resolution.
+//! - **Outputs**: Routing is selected at runtime via `assets/output.json` hotkeys (or by editing the file).
+//! - **Parameters**: Uniforms are driven by a single parameter store which supports smoothing and range mapping
+//!   from MIDI and OSC.
+//!
+//!
+//! ## Asset JSON mental model
+//! ShadeCore's runtime behavior is intentionally driven by a *small set of JSON files* under `assets/`.
+//! Think of them as separate knobs with minimal overlap:
+//!
+//! - `assets/render.json` — **which shader(s) are active** (paths + optional shader-variant list).
+//!   *Does not* define uniforms, MIDI/OSC mappings, or output routing.
+//! - `assets/params.json` — **what parameters exist** (uniform names + ranges + smoothing) and how
+//!   MIDI/OSC routes into them. This is the “param store contract”.
+//! - `assets/output.json` — **where the rendered texture is published** (Syphon/Spout/Stream/NDI/none)
+//!   and the hotkeys that switch output modes at runtime.
+//! - `assets/recording.json` (+ optional `assets/recording.profiles.json`) — **recording settings + recording hotkeys**
+//!   (start/stop/toggle). Recording is treated as a separate subsystem from output routing.
+//!
+//! Hot-reload expectations:
+//! - `render.json` and shader source changes typically apply on the *next redraw tick*.
+//! - `params.json` can apply live (new targets/ranges/mappings) without restarting, but may not affect
+//!   currently-running recordings until recording stops (by design).
+//! - `output.json` hotkeys/mode changes apply immediately (they only change publishing behavior).
+//!
+//! ## Threads
+//! - **Render thread** (main): owns the GL context; compiles shaders; draws; presents; publishes outputs.
+//! - **MIDI thread**: listens for CC messages and updates parameter targets.
+//! - **OSC thread**: listens for UDP packets (including optional introspection endpoints).
+//! - **Recording worker**: encodes frames without stalling the render loop (best-effort, can drop).
+//!
+//! ## Files that matter
+//! - `assets/shaders/<name>.frag` — fragment shader source (live-reloaded)
+//! - `assets/params.json` — parameter definitions + MIDI mapping schema
+//! - `assets/output.json` — output routing (texture/syphon/spout/ndi/stream) + hotkeys + preview prefs
+//! - `assets/recording.json` — recording settings + hotkeys (if enabled)
+//!
+//! Everything else in this file is mostly "plumbing": load config → create GL objects → run event loop.
+//!
+
 mod osc_introspection_helpers;
 
 use glow::HasContext;
@@ -25,6 +74,19 @@ use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// -----------------------------------------------------------------------------
+// Logging conventions (dev experience)
+// -----------------------------------------------------------------------------
+// ShadeCore is a multi-subsystem app (render + hot-reload + MIDI + OSC + outputs + recording).
+// A small amount of structure in logs goes a long way when debugging live sessions.
+//
+// Conventions used below:
+// - Prefix every log line with a TAG in brackets: [INIT] [CONFIG] [STATE] [RENDER] [OUTPUT] [RECORD] [MIDI] [OSC] [WATCH] [WARN] [ERROR]
+// - When something happens automatically, log the *reason* (e.g. "because file changed", "because hotkey pressed").
+// - Keep "per-frame" logs off by default. (Key presses are still logged since they help explain state changes.)
+
+mod logging;
 mod recording;
 use recording::{Recorder, RecordingCfg};
 
@@ -146,6 +208,19 @@ impl Default for PreviewCfg {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+
+/// --------------------------------
+/// output.json schema (output routing + preview controls)
+/// --------------------------------
+///
+/// This file answers the question: **"where does the rendered FBO texture go?"**
+///
+/// - It defines the active `output_mode` (texture-only preview, Syphon, Spout, Stream, NDI).
+/// - It defines hotkeys that *switch publishing mode* at runtime.
+/// - It may include per-backend config like Syphon server name or Stream URL/bitrate.
+///
+/// Importantly: output routing is *separate* from `params.json` (uniforms/mappings) and from
+/// recording configuration (`recording.json`).
 struct OutputConfigFile {
     #[serde(default = "default_output_mode")]
     output_mode: OutputMode,
@@ -503,6 +578,18 @@ fn build_recording_hotkey_map(cfg: &RecordingCfg) -> HashMap<KeyCode, RecHotkeyA
     map
 }
 
+
+/// Load recording configuration.
+///
+/// Recording config supports two shapes for long-term compatibility:
+///
+/// 1) **Legacy single-file**: `recording.json` directly matches `RecordingCfg` (one profile).
+/// 2) **Controller + profiles**: `recording.json` contains `active_profile` + hotkeys, and
+///    `recording.profiles.json` contains named profile objects. We merge them to produce a final
+///    `RecordingCfg` at runtime.
+///
+/// Why two files? It lets you switch recording “quality presets” without duplicating hotkey bindings,
+/// and it keeps `output.json` focused purely on publishing.
 fn load_recording_config(path: &Path) -> RecordingCfg {
     // Backwards compatible loader:
     // - If recording.json is a "controller" with active_profile + hotkeys, merge with recording.profiles.json.
@@ -601,19 +688,16 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
                     Ok(pf) => {
                         if let Some(p) = pf.profiles.get(&active) {
                             apply_profile(&mut cfg, p);
-                            println!(
-                                "[recording] active profile -> {} ({}x{}@{} {:?}/{:?})",
+                            logi!("RECORDING", "active profile -> {} ({}x{}@{} {:?}/{:?})",
                                 active, cfg.width, cfg.height, cfg.fps, cfg.container, cfg.codec
                             );
                         } else {
-                            eprintln!("[recording] active_profile '{}' not found in {}", active, profiles_path.display());
-                        }
+                            logw!("RECORDING", "active_profile '{}' not found in {}", active, profiles_path.display());}
                     }
-                    Err(e) => eprintln!("[recording] failed to parse {}: {e}", profiles_path.display()),
+                    Err(e) => logw!("RECORDING", "failed to parse {}: {e}", profiles_path.display()),
                 }
             } else if controller.active_profile.is_some() {
-                eprintln!("[recording] active_profile set but {} missing/unreadable", profiles_path.display());
-            }
+                logw!("RECORDING", "active_profile set but {} missing/unreadable", profiles_path.display());}
 
             return cfg;
         }
@@ -623,8 +707,7 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
     match serde_json::from_str::<RecordingCfg>(&data) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("[recording] Failed to parse {}: {e}", path.display());
-            default_cfg
+            logw!("RECORDING", "Failed to parse {}: {e}", path.display());default_cfg
         }
     }
 }
@@ -797,8 +880,7 @@ fn load_output_config(path: &Path, default_mode: OutputMode) -> OutputConfigFile
     match serde_json::from_str::<OutputConfigFile>(&data) {
         Ok(cfg) => cfg,
         Err(e) => {
-            println!(
-                "[output] Failed to parse output config ({}): {}. Using defaults.",
+            logi!("OUTPUT", "Failed to parse output config ({}): {}. Using defaults.",
                 path.display(),
                 e
             );
@@ -1108,12 +1190,35 @@ struct ParamMapping {
 }
 
 #[derive(Debug)]
+/// Shared runtime store for all *uniform* parameters.
+///
+/// The store tracks **current** values (what the renderer uses this frame) and **targets**
+/// (where inputs want the value to move toward). Each frame the render loop applies simple
+/// exponential smoothing:
+///
+/// `value += (target - value) * smooth`
+///
+/// where `smooth` is typically a small number like `0.05..0.2`.
+///
+/// Why separate `values` and `targets`?
+/// - MIDI / OSC can update targets at any time (other threads).
+/// - The render loop can advance values deterministically once per frame.
+///
+/// Ranges are stored separately so different parameters can share the same incoming "normalized"
+/// control space (0..1) but map to different semantic ranges (e.g. zoom 0.25..4.0).
 struct ParamStore {
+    /// Current (smoothed) value used by the renderer this frame.
     values: HashMap<String, f32>,
+    /// Latest desired value coming from inputs (MIDI/OSC/UI).
     targets: HashMap<String, f32>,
+    /// Per-parameter smoothing coefficient in the range 0..1.
     smooth: HashMap<String, f32>,
+    /// Per-parameter (min,max) range used when mapping normalized values.
     ranges: HashMap<String, (f32, f32)>,
-    mappings: HashMap<(u8, u8), ParamMapping>, // (channel, cc) -> mapping
+    /// MIDI CC mapping table: (channel, cc) -> mapping.
+    ///
+    /// Channel may be a wildcard (255) to mean "any channel" depending on the mapping layer.
+    mappings: HashMap<(u8, u8), ParamMapping>,
 }
 
 
@@ -1148,10 +1253,8 @@ impl ParamStore {
         }
 
         let mappings = Self::build_mappings(pf, &pf.midi, &HashMap::new());
-        println!("[midi] mappings[startup] count={}", mappings.len());
-        for ((ch, cc), map) in mappings.iter().take(32) {
-            println!("[midi] map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);
-        }
+        logi!("MIDI", "mappings[startup] count={}", mappings.len());for ((ch, cc), map) in mappings.iter().take(32) {
+            logi!("MIDI", "map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);}
 
         Self {
             values,
@@ -1253,17 +1356,13 @@ impl ParamStore {
                     self.targets.insert(k.clone(), v);
                 }
 
-                println!("[params] applied profile: {profile}");
-            } else {
-                eprintln!("[params] profile not found: {profile}");
-            }
+                logi!("PARAMS", "applied profile: {profile}");} else {
+                logw!("PARAMS", "profile not found: {profile}");}
         }
 
         self.mappings = Self::build_mappings(new_pf, &effective_midi, &cc_overrides);
-        println!("[midi] mappings[params_reload] count={}", self.mappings.len());
-        for ((ch, cc), map) in self.mappings.iter().take(32) {
-            println!("[midi] map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);
-        }
+        logi!("MIDI", "mappings[params_reload] count={}", self.mappings.len());for ((ch, cc), map) in self.mappings.iter().take(32) {
+            logi!("MIDI", "map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);}
 
         effective_midi
     }
@@ -1306,21 +1405,16 @@ impl ParamStore {
             let effective_midi = merge_midi_cfg(&pf.midi, preset.midi_override());
             let cc_overrides = preset.cc_overrides();
             self.mappings = Self::build_mappings(pf, &effective_midi, &cc_overrides);
-            println!("[midi] mappings[profile_apply] count={}", self.mappings.len());
-            for ((ch, cc), map) in self.mappings.iter().take(32) {
-                println!("[midi] map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);
-            }
+            logi!("MIDI", "mappings[profile_apply] count={}", self.mappings.len());for ((ch, cc), map) in self.mappings.iter().take(32) {
+                logi!("MIDI", "map ch={} cc={} -> {} (min={} max={} smooth={})", ch, cc, map.name, map.min, map.max, map.smoothing);}
 
             if let Some(shader_path) = shader_frag {
-                println!("[params] applied profile: {profile_name} (shader: {})", shader_path.display());
-            } else {
-                println!("[params] applied profile: {profile_name}");
-            }
+                logi!("PARAMS", "applied profile: {profile_name} (shader: {})", shader_path.display());} else {
+                logi!("PARAMS", "applied profile: {profile_name}");}
 
             effective_midi
         } else {
-            eprintln!("[params] profile not found: {profile_name} (keeping existing MIDI mappings)");
-            // Do NOT clobber mappings here; keep last-good routing.
+            logw!("PARAMS", "profile not found: {profile_name} (keeping existing MIDI mappings)");// Do NOT clobber mappings here; keep last-good routing.
             pf.midi.clone()
         }
     }
@@ -1714,16 +1808,13 @@ impl StreamSender {
                 args.push(self.cfg.rtsp_url.clone());
 
                 if !self.warned {
-                    println!("[stream] RTSP mode is PUSH: you need an RTSP server running at {} (e.g. MediaMTX), then open that URL in VLC.", self.cfg.rtsp_url);
-                    println!("[stream] If no RTSP server is running, ffmpeg can block while connecting and you won't see a stream in VLC.");
-                    self.warned = true;
+                    logi!("OUTPUT", "RTSP mode is PUSH: you need an RTSP server running at {} (e.g. MediaMTX), then open that URL in VLC.", self.cfg.rtsp_url);logi!("OUTPUT", "If no RTSP server is running, ffmpeg can block while connecting and you won't see a stream in VLC.");self.warned = true;
                 }
             }
             StreamTarget::Rtmp => {
                 let Some(url) = self.cfg.rtmp_url.clone() else {
                     if !self.warned {
-                        println!("[stream] target=rtmp but rtmp_url is missing in output.json.");
-                        self.warned = true;
+                        logi!("OUTPUT", "target=rtmp but rtmp_url is missing in output.json.");self.warned = true;
                     }
                     return;
                 };
@@ -1735,7 +1826,7 @@ impl StreamSender {
 
         let (tx, rx) = mpsc::sync_channel::<StreamMsg>(2);
 
-        let worker = thread::spawn(move || {
+        let worker = std::thread::Builder::new().name("stream".to_string()).spawn(move || {
             let mut cmd = Command::new(ffmpeg);
             cmd.args(&args)
                 .stdin(Stdio::piped())
@@ -1745,29 +1836,23 @@ impl StreamSender {
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
-                    println!("[stream] Failed to start ffmpeg: {}", e);
-                    println!("[stream] Tip: install ffmpeg or set stream.ffmpeg_path in output.json");
-                    return;
+                    logi!("OUTPUT", "Failed to start ffmpeg: {}", e);logi!("OUTPUT", "Tip: install ffmpeg or set stream.ffmpeg_path in output.json");return;
                 }
             };
 
             let Some(mut stdin) = child.stdin.take() else {
-                println!("[stream] Failed to open ffmpeg stdin.");
-                let _ = child.kill();
+                logi!("OUTPUT", "Failed to open ffmpeg stdin.");let _ = child.kill();
                 let _ = child.wait();
                 return;
             };
 
-            println!("[stream] ffmpeg started ({}x{}, writing frames)", w, h);
-
-            // Writer loop. If ffmpeg is blocked connecting (e.g. no RTSP server),
+            logi!("OUTPUT", "ffmpeg started ({}x{}, writing frames)", w, h);// Writer loop. If ffmpeg is blocked connecting (e.g. no RTSP server),
             // writes may block — but this is on a background thread so the UI won't freeze.
             while let Ok(msg) = rx.recv() {
                 match msg {
                     StreamMsg::Frame(frame) => {
                         if let Err(e) = stdin.write_all(&frame) {
-                            println!("[stream] ffmpeg stdin write failed: {}", e);
-                            break;
+                            logi!("OUTPUT", "ffmpeg stdin write failed: {}", e);break;
                         }
                     }
                     StreamMsg::Stop => {
@@ -1779,8 +1864,7 @@ impl StreamSender {
             // Cleanup
             let _ = child.kill();
             let _ = child.wait();
-            println!("[stream] ffmpeg stopped");
-        });
+            logi!("OUTPUT", "ffmpeg stopped");}).expect("spawn stream thread");
 
         self.tx = Some(tx);
         self.worker = Some(worker);
@@ -1948,12 +2032,11 @@ mod ndi_out {
             let w0 = w;
             let h0 = h;
 
-            let handle = thread::spawn(move || {
+            let handle = std::thread::Builder::new().name("ndi".to_string()).spawn(move || {
                 let ndi = match NDI::new() {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[ndi] Failed to init NDI: {e:?}");
-                        return;
+                        logw!("OUTPUT", "Failed to init NDI: {e:?}");return;
                     }
                 };
 
@@ -1967,13 +2050,11 @@ mod ndi_out {
                 let sender = match Sender::new(&ndi, &opts) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("[ndi] Failed to create sender: {e:?}");
-                        return;
+                        logw!("OUTPUT", "Failed to create sender: {e:?}");return;
                     }
                 };
 
-                println!("[ndi] Sender started: {}", name);
-                println!("[ndi] Enabled. Receiver: OBS via DistroAV/OBS-NDI should see source \"{}\".", name);
+                logi!("OUTPUT", "Sender started: {}", name);logi!("OUTPUT", "NDI enabled. Receiver: OBS via DistroAV/OBS-NDI should see source \"{}\".", name);
 
                 // Pre-build a frame shell we can reuse and just swap data/stride each time.
                 // We'll still rebuild if resolution changes (it shouldn't while running).
@@ -2010,8 +2091,7 @@ mod ndi_out {
                     }
                 }
 
-                println!("[ndi] Sender stopped");
-            });
+                logi!("OUTPUT", "Sender stopped");}).expect("spawn ndi thread");
 
             self.tx = Some(tx);
             self.worker = Some(handle);
@@ -2099,8 +2179,7 @@ mod ndi_out {
             let frame = self.buf_bgra.clone();
             if tx.try_send(NdiMsg::Frame { bgra: frame, w, h }).is_err() && !self.warned {
                 self.warned = true;
-                eprintln!("[ndi] Dropping frames (sender busy). Consider lowering fps or resolution.");
-            }
+                logw!("OUTPUT", "Dropping frames (sender busy). Consider lowering fps or resolution.");}
         }
 
         pub fn stop(&mut self) {
@@ -2260,8 +2339,7 @@ fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<m
 
     let ports = midi_in.ports();
     if ports.is_empty() {
-        println!("[midi] No MIDI input ports detected.");
-        return None;
+        logi!("MIDI", "No MIDI input ports detected.");return None;
     }
 
     let preferred = midi
@@ -2284,9 +2362,7 @@ fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<m
 
     let in_port = chosen?;
     let port_name = midi_in.port_name(&in_port).unwrap_or_else(|_| "Unknown".into());
-    println!("[midi] Connecting input: {}", port_name);
-
-    let conn = midi_in.connect(
+    logi!("MIDI", "Connecting input: {}", port_name);let conn = midi_in.connect(
         &in_port,
         "shadecore-midi-in",
         move |_ts, msg, _| {
@@ -2305,7 +2381,7 @@ fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<m
                 }
 
                 if n < 80 || !mapped {
-                    println!("[midi:in] ch={} cc={} val={} mapped={}", ch, cc, val, mapped);
+                    logi!("MIDI", "ch={} cc={} val={} mapped={}", ch, cc, val, mapped);
                 }
                           }
         },
@@ -2315,8 +2391,7 @@ fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<m
     match conn {
         Ok(c) => Some(c),
         Err(e) => {
-            println!("[midi] Failed to connect MIDI input: {e}");
-            None
+            logi!("MIDI", "Failed to connect MIDI input: {e}");None
         }
     }
 }
@@ -2352,18 +2427,15 @@ fn connect_osc(rt: Arc<RwLock<OscRuntime>>, store: Arc<Mutex<ParamStore>>) -> Op
     let sock = match UdpSocket::bind(&bind) {
         Ok(s) => s,
         Err(e) => {
-            println!("[osc] Failed to bind {bind}: {e}");
-            return None;
+            logi!("OSC", "Failed to bind {bind}: {e}");return None;
         }
     };
 
     let _ = sock.set_nonblocking(true);
 
-    println!("[osc] listening on {bind} prefix={prefix} normalized={normalized}");
+    logi!("OSC", "listening on {bind} prefix={prefix} normalized={normalized}");let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
 
-    let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-
-    let join = std::thread::spawn(move || {
+    let join = std::thread::Builder::new().name("osc".to_string()).spawn(move || {
         let mut buf = [0u8; 2048];
         loop {
             if stop_rx.try_recv().is_ok() {
@@ -2377,7 +2449,15 @@ fn connect_osc(rt: Arc<RwLock<OscRuntime>>, store: Arc<Mutex<ParamStore>>) -> Op
                         Err(_e) => continue,
                     };
 
-                    fn handle_packet(pkt: OscPacket, store: &Arc<Mutex<ParamStore>>, rt: &OscRuntime, sock: &UdpSocket, from: std::net::SocketAddr) {
+                    /// Handle a single OSC packet.
+///
+/// ShadeCore supports two styles of OSC control:
+/// - **Normalized**: `/prefix/param/<name>` with a float in 0..1 that is mapped via `(min,max)`.
+/// - **Raw**:        `/prefix/raw/<name>` with a float that is used directly.
+///
+/// In addition, optional *introspection* endpoints can be enabled (see
+/// `osc_introspection_helpers.rs`) so controllers can discover params/mappings at runtime.
+fn handle_packet(pkt: OscPacket, store: &Arc<Mutex<ParamStore>>, rt: &OscRuntime, sock: &UdpSocket, from: std::net::SocketAddr) {
                         match pkt {
                             OscPacket::Message(msg) => {
                                 let addr = msg.addr;
@@ -2397,8 +2477,7 @@ if crate::osc_introspection_helpers::osc_try_introspect(
 if let Ok(mut s) = store.lock() {
                                     if let Some((name, target, used_norm)) = s.apply_osc_runtime(rt, &addr, args.as_slice()) {
                                         let mode = if used_norm { "NORM" } else { "RAW" };
-                                        println!("[osc] {mode} {addr} -> {name} target={target}");
-                                    }
+                                        logi!("OSC", "{mode} {addr} -> {name} target={target}");}
                                 }
                             }
                             OscPacket::Bundle(b) => {
@@ -2417,8 +2496,7 @@ if let Ok(mut s) = store.lock() {
                 }
             }
         }
-        println!("[osc] stopped");
-    });
+        logi!("OSC", "stopped");}).expect("spawn osc thread");
 
     Some(OscHandle { stop_tx, join: Some(join) })
 }
@@ -2579,6 +2657,20 @@ struct RenderSel {
 ///   "present_frag": "shaders/present.frag"
 /// }
 #[derive(Debug, Clone, serde::Deserialize)]
+
+/// --------------------------------
+/// render.json schema (shader selection)
+/// --------------------------------
+///
+/// This file answers the question: **"which fragment shader(s) should be used right now?"**
+///
+/// - `frag` selects a single fragment shader path.
+/// - `frag_variants` (optional) defines a list of fragment shaders you can cycle through.
+/// - `active_frag` (optional) selects which entry in `frag_variants` starts active.
+/// - `frag_profile_map` (optional) links a fragment shader to a params profile name from `params.json`
+///   so the engine can auto-apply per-shader MIDI/OSC/uniform defaults.
+///
+/// This file does **not** define MIDI/OSC mappings, uniform ranges, or output routing.
 struct RenderJson {
     #[serde(default)]
     frag: Option<String>,
@@ -2686,7 +2778,11 @@ fn load_render_sel(assets: &std::path::Path) -> RenderSel {
             }
         }
         Err(e) => {
-            eprintln!("[render] Failed to parse render.json ({}) - using defaults. Error: {e}", render_cfg.display());
+            loge!(
+                "CONFIG",
+                "failed to parse render.json ({}); using defaults. reason=JSON parse error: {e}",
+                render_cfg.display()
+            );
             RenderSel {
                 frag_path: default_frag.clone(),
                 present_frag_path: default_present.clone(),
@@ -2719,14 +2815,14 @@ fn main() {
     let params_path = pick_platform_json(&assets, "params");
     let output_cfg_path = pick_platform_json(&assets, "output");
 
-    println!("[assets] base: {}", assets.display());
-    println!("[assets] render: {}", render_cfg_path.display());
-    println!("[assets] frag: {}", frag_path.display());
-    println!("[assets] present: {}", present_frag_path.display());
-    println!("[assets] params: {}", params_path.display());
-    println!("[assets] output: {}", output_cfg_path.display());
+    logi!("INIT", "assets base: {}", assets.display());
+    logi!("INIT", "assets render.json: {}", render_cfg_path.display());
+    logi!("INIT", "active shader: {}", frag_path.display());
+    logi!("INIT", "present shader: {}", present_frag_path.display());
+    logi!("INIT", "assets params.json: {}", params_path.display());
+    logi!("INIT", "assets output.json: {}", output_cfg_path.display());
     let recording_cfg_path = pick_platform_json(&assets, "recording");
-    println!("[assets] recording: {}", recording_cfg_path.display());
+    logi!("INIT", "assets recording.json: {}", recording_cfg_path.display());
 
 
     let frag_src = read_to_string(&frag_path);
@@ -2735,17 +2831,14 @@ fn main() {
     let params_src = read_to_string(&params_path);
     let mut pf: ParamsFile = serde_json::from_str(&params_src)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", params_path.display()));
-    println!("[params] loaded version {}", pf.version);
-
-    // Choose an initial active profile:
+    logi!("PARAMS", "loaded version {}", pf.version);// Choose an initial active profile:
     // 1) explicit active_profile
     // 2) "default" if present
     // 3) first profile (sorted) if present
     let mut active_profile: Option<String> =
         pick_active_profile_for_shader(&pf, &assets, &frag_path);
     if let Some(p) = &active_profile {
-        println!("[params] active profile: {p}");
-    }
+        logi!("PARAMS", "active profile: {p}");}
 
     let store = Arc::new(Mutex::new(ParamStore::new(&pf)));
 
@@ -2771,7 +2864,7 @@ let event_proxy = event_loop.create_proxy();
     let assets_dir_for_watch = assets.clone();
     let proxy_for_watch = event_proxy.clone();
 
-    std::thread::spawn(move || {
+    let _watcher_thread = std::thread::Builder::new().name("watcher".to_string()).spawn(move || {
         use notify::{RecursiveMode, Watcher};
 
         let interesting: [&OsStr; 4] = [
@@ -2805,31 +2898,31 @@ let event_proxy = event_loop.create_proxy();
                     if hit {
                         // Helpful: print what changed (best-effort).
                         if let Some(p) = ev.paths.get(0) {
-                            eprintln!("[watch] config change detected: {}", p.display());
+                            logi!("WATCH", "change detected: {} (because file system event)", p.display());
                         } else {
-                            eprintln!("[watch] config change detected");
+                            logi!("WATCH", "change detected (because file system event)");
                         }
                         let _ = proxy_for_watch.send_event(AppEvent::ConfigChanged);
                     }
                 }
-                Err(e) => eprintln!("[watch] notify error: {e}"),
+                Err(e) => logw!("WATCH", "notify error: {e}"),
             }
         }) {
             Ok(w) => w,
             Err(e) => {
-                eprintln!("[watch] failed to create watcher: {e}");
+                loge!("WATCH", "failed to create watcher: {e}");
                 return;
             }
         };
 
         if let Err(e) = watcher.watch(&assets_dir_for_watch, RecursiveMode::NonRecursive) {
-            eprintln!("[watch] failed to watch assets dir {}: {e}", assets_dir_for_watch.display());
+            loge!("WATCH", "failed to watch assets dir {}: {e}", assets_dir_for_watch.display());
             return;
         }
         let shaders_dir = assets_dir_for_watch.join("shaders");
         if shaders_dir.is_dir() {
             if let Err(e) = watcher.watch(&shaders_dir, RecursiveMode::NonRecursive) {
-                eprintln!("[watch] failed to watch shaders dir {}: {e}", shaders_dir.display());
+                logw!("WATCH", "failed to watch shaders dir {}: {e}", shaders_dir.display());
                 // not fatal; we can still watch assets/
             }
         }
@@ -2837,7 +2930,7 @@ let event_proxy = event_loop.create_proxy();
 
         // keep thread alive
         loop { std::thread::sleep(Duration::from_secs(3600)); }
-    });
+    }).expect("spawn watcher thread");
 }
     let window_builder = winit::window::WindowBuilder::new()
         .with_title("shadecore")
@@ -2921,8 +3014,7 @@ let event_proxy = event_loop.create_proxy();
 
     let output_cfg = load_output_config(&output_cfg_path, default_mode);
 let recording_cfg = load_recording_config(&recording_cfg_path);
-println!(
-    "[recording] loaded: enabled={} size={}x{} fps={} start_keys={:?} stop_keys={:?} toggle_keys={:?} out_dir={} ffmpeg_path={}",
+logi!("RECORDING", "loaded: enabled={} size={}x{} fps={} start_keys={:?} stop_keys={:?} toggle_keys={:?} out_dir={} ffmpeg_path={}",
     recording_cfg.enabled,
     recording_cfg.width,
     recording_cfg.height,
@@ -2969,8 +3061,7 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
     let mut presenter: Presenter = if output_cfg.preview.enabled {
         Presenter::Window(WindowPresenter { vao })
     } else {
-        println!("[preview] disabled (presenter=null) — running render + route only");
-        Presenter::Null(NullPresenter::default())
+        logi!("PREVIEW", "disabled (presenter=null) — running render + route only");Presenter::Null(NullPresenter::default())
     };
 
     // If preview is disabled, hide the window so installs can run "headless" (render + route only).
@@ -2984,10 +3075,7 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
     // Preview scaling mode (presentation only; does NOT affect recording/FBO size)
     // 0=fit (letterbox), 1=fill (crop), 2=stretch, 3=pixel (1:1 centered)
     let mut preview_scale_mode: i32 = output_cfg.preview.scale_mode.as_i32();
-    println!("[preview] initial scale_mode: {} (mode={})", preview_scale_mode_name(preview_scale_mode), preview_scale_mode);
-
-    println!(
-        "[output] startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?} | ndi.enabled={} name='{}' | preview.scale_mode={}",
+    logi!("PREVIEW", "initial scale_mode: {} (mode={})", preview_scale_mode_name(preview_scale_mode), preview_scale_mode);logi!("OUTPUT", "startup mode={:?} | syphon.enabled={} name='{}' | spout.enabled={} name='{}' invert={} | stream.enabled={} target={:?} | ndi.enabled={} name='{}' | preview.scale_mode={}",
         output_mode,
         syphon_enabled,
         syphon_name,
@@ -3001,8 +3089,7 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         output_cfg.preview.scale_mode.as_str()
     );
 
-    println!(
-        "[output] stream.enabled={} target={:?} rtsp_url='{}' rtmp_url={:?} fps={} bitrate_kbps={} gop={} vflip={}",
+    logi!("OUTPUT", "stream.enabled={} target={:?} rtsp_url='{}' rtmp_url={:?} fps={} bitrate_kbps={} gop={} vflip={}",
         stream_enabled,
         stream_cfg.target,
         stream_cfg.rtsp_url,
@@ -3013,8 +3100,7 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         stream_cfg.vflip
     );
 
-    println!(
-        "[output] ndi.enabled={} name='{}' groups={:?} fps={}/{} clock_video={} vflip={}",
+    logi!("OUTPUT", "ndi.enabled={} name='{}' groups={:?} fps={}/{} clock_video={} vflip={}",
         ndi_enabled,
         ndi_name,
         ndi_cfg.groups,
@@ -3076,13 +3162,17 @@ let mut stream = StreamSender::new(stream_cfg.clone());
                                         WindowEvent::KeyboardInput { event, .. } => {
                         if event.state.is_pressed() && !event.repeat {
                             if let PhysicalKey::Code(code) = event.physical_key {
-                                println!("[key] pressed: {:?}", code);
+                                logi!("INPUT", "key pressed: {:?}", code);
 
                                 // --- Profile hotkeys (params.json) ---
-                                if let Some(pact) = profile_hotkeys.get(&code).cloned() {
+                                // ------------------------------ Shader profile switching ------------------------------
+// Parameter “profiles” are *per-shader default uniform sets* (e.g. a 'default' vs 'wide' vibe).
+// These hotkeys do NOT change MIDI/OSC mappings or min/max ranges — they only select which
+// named default-uniform set to seed when the shader is (re)loaded.
+// See docs: Profiles Mental Model (docs/_docs/10-profiles-mental-model.md).
+if let Some(pact) = profile_hotkeys.get(&code).cloned() {
                                     if profile_names.is_empty() {
-                                        println!("[params] no profiles defined");
-                                    } else {
+                                        logi!("PARAMS", "no profiles defined");} else {
                                         let cur_name = active_profile.clone().unwrap_or_else(|| profile_names[0].clone());
                                         let cur_idx = profile_names.iter().position(|n| n == &cur_name).unwrap_or(0);
 
@@ -3118,8 +3208,7 @@ let is_prev = matches!(code, KeyCode::Semicolon | KeyCode::Comma | KeyCode::Intl
 
 if is_next || is_prev {
     if frag_variants.len() <= 1 {
-        println!("[render] no frag_variants (or only one). Add `frag_variants` to render.json to enable cycling.");
-    } else {
+        logi!("RENDER", "no frag_variants (or only one). Add `frag_variants` to render.json to enable cycling.");} else {
         if is_next {
             frag_variant_idx = (frag_variant_idx + 1) % frag_variants.len();
         } else {
@@ -3131,20 +3220,17 @@ if is_next || is_prev {
         // When switching shaders, also switch to that shader's active profile (and rebuild MIDI mappings).
         active_profile = pick_active_profile_for_shader(&pf, &assets, &frag_path);
         if let Some(pname) = active_profile.clone() {
-            println!("[params] shader switch -> profile: {}", pname);
-            set_active_profile_for_shader(&mut pf, &assets, &frag_path, &pname);
+            logi!("PARAMS", "shader switch -> profile: {}", pname);set_active_profile_for_shader(&mut pf, &assets, &frag_path, &pname);
             effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), &pname);
             midi_conn_in = connect_midi(&effective_midi, store.clone());
         } else {
-            println!("[params] shader switch -> no profiles found (keeping existing mappings)");
-        }
+            logi!("PARAMS", "shader switch -> no profiles found (keeping existing mappings)");}
 
         // Force shader reload next tick (even if the file didn't change on disk).
         frag_mtime = None;
         configs_dirty = true;
 
-        println!(
-            "[render] frag variant -> {} ({} / {})",
+        logi!("RENDER", "frag variant -> {} ({} / {})",
             frag_path.display(),
                                             frag_variant_idx + 1,
                                             frag_variants.len()
@@ -3152,53 +3238,73 @@ if is_next || is_prev {
                                     }
                                 }
 
+// --- Recording hotkeys (recording.json) ---
+//
+// Recording is driven by `assets/recording.json` and its own hotkey map.
+// This is intentionally separate from output routing:
+// - output routing controls publishing the live texture elsewhere
+// - recording controls an ffmpeg capture pipeline + readback resources (PBOs)
+//
+// Config reload rule: we do *not* live-reload recording settings while a recording
+// is active, because it would invalidate PBO sizing / ffmpeg expectations mid-stream.
+// If recording.json changes while recording, we defer reload until after stop.
 if let Some(action) = recording_hotkeys.get(&code).copied() {
-                                    println!("[recording] hotkey pressed: {:?} -> {:?}", code, action);
+                                    logi!("INPUT", "recording hotkey {:?} -> {:?}", code, action);
                                     match action {
                                         RecHotkeyAction::Toggle => {
                                             if recorder.is_recording() {
                                                 recorder.stop();
-                                                println!("[recording] stopped");
+                                                logi!("STATE", "recording -> stopped (because toggle hotkey)");
                                             } else if recorder.is_enabled() {
                                                 match recorder.start(&assets) {
                                                     Ok(p) => {
                                                         rec_pbo_index = 0;
                                                         rec_pbo_primed = false;
-                                                        println!("[recording] started -> {}", p.display());
+                                                        logi!("STATE", "recording -> started path={} (because toggle hotkey)", p.display());
                                                     }
-                                                    Err(e) => eprintln!("[recording] start failed: {e}"),
+                                                    Err(e) => loge!("ERROR", "recording start failed (because toggle hotkey): {e}"),
                                                 }
                                             } else {
-                                                println!("[recording] disabled: set enabled=true in recording.json");
+                                                logw!("WARN", "recording hotkey ignored (recording disabled; enable in recording.json)");
                                             }
                                         }
                                         RecHotkeyAction::Start => {
                                             if recorder.is_recording() {
-                                                println!("[recording] already recording");
+                                                logw!("WARN", "recording start ignored (already recording)");
                                             } else if recorder.is_enabled() {
                                                 match recorder.start(&assets) {
                                                     Ok(p) => {
                                                         rec_pbo_index = 0;
                                                         rec_pbo_primed = false;
-                                                        println!("[recording] started -> {}", p.display());
+                                                        logi!("STATE", "recording -> started path={} (because start hotkey)", p.display());
                                                     }
-                                                    Err(e) => eprintln!("[recording] start failed: {e}"),
+                                                    Err(e) => loge!("ERROR", "recording start failed (because start hotkey): {e}"),
                                                 }
                                             } else {
-                                                println!("[recording] disabled: set enabled=true in recording.json");
+                                                logw!("WARN", "recording start ignored (recording disabled; enable in recording.json)");
                                             }
                                         }
                                         RecHotkeyAction::Stop => {
                                             if recorder.is_recording() {
                                                 recorder.stop();
-                                                println!("[recording] stopped");
+                                                logi!("STATE", "recording -> stopped (because stop hotkey)");
                                             } else {
-                                                println!("[recording] not recording");
+                                                logw!("WARN", "recording stop ignored (not recording)");
                                             }
                                         }
                                     }
                                     return;
                                 }
+
+// --- Output routing hotkeys (output.json) ---
+//
+// `hotkey_map` is built from `assets/output.json` and maps physical keys to an
+// `OutputMode`. This only changes *where* the authoritative render texture is
+// published (Syphon/Spout/Stream/NDI); it does not change shader params, render
+// resolution, or recording configuration.
+//
+// Side effect note: some modes own external resources (FFmpeg process, NDI sender).
+// When switching away, we stop/teardown those resources to avoid dangling processes.
 
                                 let new_mode = hotkey_map.get(&code).copied();
                                 if let Some(m) = new_mode {
@@ -3206,7 +3312,12 @@ if let Some(action) = recording_hotkeys.get(&code).copied() {
                                     if output_mode == OutputMode::Ndi && m != OutputMode::Ndi { ndi.stop(); }
                                     output_mode = m;
                                     warned = false;
-                                    println!("[output] switched -> {:?}", output_mode);
+                                    logi!(
+                                        "STATE",
+                                        "output mode -> {:?} (because hotkey {:?})",
+                                        output_mode,
+                                        code
+                                    );
                                     window.set_title(&format!(
                                         "shadecore - output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream, 6=NDI)",
                                         output_mode
@@ -3221,8 +3332,7 @@ if let PhysicalKey::Code(code) = event.physical_key {
         if pm != preview_scale_mode {
             preview_scale_mode = pm;
             let name = preview_scale_mode_name(preview_scale_mode);
-            println!(
-                "[preview] hotkey pressed: {:?} -> {} (mode={})",
+            logi!("PREVIEW", "hotkey pressed: {:?} -> {} (mode={})",
                 code,
                 name,
                 preview_scale_mode
@@ -3246,9 +3356,34 @@ if let PhysicalKey::Code(code) = event.physical_key {
                     },
 
                     WindowEvent::RedrawRequested => unsafe {
+
+// ---------------------------------------------------------------------
+// Render tick (winit redraw)
+//
+// This is the *one place* we do GPU work each frame:
+//   1) Apply hot-reload changes (shader/config) if any flags/mtimes changed.
+//   2) Update smoothed params/uniform inputs (time, resolution, MIDI/OSC-driven params).
+//   3) Render into the authoritative offscreen RenderTarget (FBO texture).
+//   4) Publish that texture to the currently-selected output backend (Syphon/Spout/Stream/NDI).
+//   5) Present a scaled preview of the same texture to the local window.
+//   6) Optionally perform recording readback (PBO ping-pong) without stalling the GPU.
+//
+// Important: preview window size is *not* the render size. The render size comes from the
+// render config / recording config and is the source of truth for outputs and captures.
+// ---------------------------------------------------------------------
+
                         let win_size = window.inner_size();
                         let win_w = win_size.width as i32;
                         let win_h = win_size.height as i32;
+
+// Hot-reload boundary (shader + JSON configs)
+//
+// We keep hot-reload *outside* the inner render calls:
+// - file watcher events set cheap flags (`configs_dirty`)
+// - on redraw we check mtimes and do the heavier work (re-parse JSON, recompile program)
+//
+// This avoids doing I/O or shader compilation inside event callbacks, and keeps the
+// render tick as the single consistent place where GL state changes happen.
 
                         // Authoritative render size (used for uniforms, outputs, and recording).
                         let w = rt.w;
@@ -3364,6 +3499,16 @@ if recorder.is_recording() {
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
+// -----------------------------------------------------------------
+// Recording readback (PBO ping-pong)
+//
+// We read frames asynchronously using two Pixel Pack Buffers:
+// - each frame: issue glReadPixels into "write_pbo" (GPU command)
+// - next frame: map "read_pbo" on CPU and feed bytes to ffmpeg
+//
+// This avoids a hard GPU->CPU sync each frame. If mapping fails or the queue backs up,
+// we prefer dropping frames over stalling the render loop.
+// -----------------------------------------------------------------
             // CPU: map previous PBO and send to ffmpeg
             if rec_pbo_primed {
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(read_pbo));
@@ -3395,14 +3540,24 @@ if recorder.is_recording() {
 
 
 
+// -----------------------------------------------------------------
+// Output publishing
+//
+// At this point the shader has rendered into the offscreen RenderTarget texture.
+// This switch decides which *external* sink we publish that texture to.
+//
+// Rule of thumb:
+// - Texture: do nothing (preview-only)
+// - Syphon/Spout/NDI: publish the GL texture handle through the platform bridge
+// - Stream: push CPU frames into an ffmpeg process (requires readback or compatible path)
+// -----------------------------------------------------------------
                         match output_mode {
                             OutputMode::Texture => {}
 
                             OutputMode::Stream => {
                                 if !stream.is_enabled() {
                                     if !warned {
-                                        println!("[output] Stream requested but disabled in output.json. Falling back to Texture.");
-                                        warned = true;
+                                        logi!("OUTPUT", "Stream requested but disabled in output.json. Falling back to Texture.");warned = true;
                                     }
                                 } else {
                                     stream.send_current_fbo_frame(&gl, rt.fbo, w, h);
@@ -3413,8 +3568,7 @@ if recorder.is_recording() {
                             OutputMode::Ndi => {
                                 if !ndi.is_enabled() {
                                     if !warned {
-                                        println!("[output] NDI requested but disabled in output.json (or built without --features ndi). Falling back to Texture.");
-                                        warned = true;
+                                        logi!("OUTPUT", "NDI requested but disabled in output.json (or built without --features ndi). Falling back to Texture.");warned = true;
                                     }
                                 } else {
                                     ndi.send_current_fbo_frame(&gl, rt.fbo, w, h);
@@ -3426,15 +3580,13 @@ if recorder.is_recording() {
                                 {
                                     if !syphon_enabled {
                                         if !warned {
-                                            println!("[output] Syphon requested but disabled in output.json. Falling back to Texture.");
-                                            warned = true;
+                                            logi!("OUTPUT", "Syphon requested but disabled in output.json. Falling back to Texture.");warned = true;
                                         }
                                     } else {
                                         if syphon.is_none() {
                                             syphon = SyphonServer::new(&syphon_name);
                                             if syphon.is_none() && !warned {
-                                                println!("[output] Syphon init failed. Falling back to Texture.");
-                                                warned = true;
+                                                logi!("OUTPUT", "Syphon init failed. Falling back to Texture.");warned = true;
                                             }
                                         }
                                         if let Some(ref server) = syphon {
@@ -3446,16 +3598,14 @@ if recorder.is_recording() {
                                 #[cfg(all(target_os = "macos", not(has_syphon)))]
                                 {
                                     if !warned {
-                                        println!("[output] Syphon requested but Syphon.framework is not vendored. Falling back to Texture.");
-                                        warned = true;
+                                        logi!("OUTPUT", "Syphon requested but Syphon.framework is not vendored. Falling back to Texture.");warned = true;
                                     }
                                 }
 
                                 #[cfg(not(target_os = "macos"))]
                                 {
                                     if !warned {
-                                        println!("[output] Syphon requested but macOS-only. Falling back to Texture.");
-                                        warned = true;
+                                        logi!("OUTPUT", "Syphon requested but macOS-only. Falling back to Texture.");warned = true;
                                     }
                                 }
                             }
@@ -3465,22 +3615,19 @@ if recorder.is_recording() {
                                 {
                                     if !spout_enabled {
                                         if !warned {
-                                            println!("[output] Spout requested but disabled in output.json. Falling back to Texture.");
-                                            warned = true;
+                                            logi!("OUTPUT", "Spout requested but disabled in output.json. Falling back to Texture.");warned = true;
                                         }
                                     } else {
                                         if spout.is_none() {
                                             spout = SpoutSender::new(&spout_name, w, h, spout_invert);
                                             if spout.is_none() && !warned {
-                                                println!("[output] Spout init failed. Falling back to Texture.");
-                                                warned = true;
+                                                logi!("OUTPUT", "Spout init failed. Falling back to Texture.");warned = true;
                                             }
                                         }
                                         if let Some(ref sender) = spout {
                                             let ok = sender.send_texture(tex_id, w, h);
                                             if !ok && !warned {
-                                                println!("[output] Spout send failed. Falling back to Texture.");
-                                                warned = true;
+                                                logi!("OUTPUT", "Spout send failed. Falling back to Texture.");warned = true;
                                             }
                                         }
                                     }
@@ -3489,8 +3636,7 @@ if recorder.is_recording() {
                                 #[cfg(not(target_os = "windows"))]
                                 {
                                     if !warned {
-                                        println!("[output] Spout requested but Windows-only. Falling back to Texture.");
-                                        warned = true;
+                                        logi!("OUTPUT", "Spout requested but Windows-only. Falling back to Texture.");warned = true;
                                     }
                                 }
                             }
@@ -3538,20 +3684,17 @@ if recorder.is_recording() {
                                     frag_path = render_sel.frag_path.clone();
                                     selection_changed = true;
                                     frag_mtime = None; // force reload
-                                    println!("[render] frag -> {}", frag_path.display());
-                                }
+                                    logi!("RENDER", "frag -> {}", frag_path.display());}
                                 if render_sel.present_frag_path != present_frag_path {
                                     present_frag_path = render_sel.present_frag_path.clone();
                                     selection_changed = true;
                                     present_frag_mtime = None; // force reload
-                                    println!("[render] present_frag -> {}", present_frag_path.display());
-                                }
+                                    logi!("RENDER", "present_frag -> {}", present_frag_path.display());}
                             }
 
                                 // If render.json defines a frag->profile mapping, apply it on selection changes too.
                                 if let Some(pname) = frag_profile_map.get(&frag_path).cloned() {
-                                    println!("[params] frag mapped -> profile: {}", pname);
-                                    active_profile = Some(pname.clone());
+                                    logi!("PARAMS", "frag mapped -> profile: {}", pname);active_profile = Some(pname.clone());
                                     set_active_profile_for_shader(&mut pf, &assets, &frag_path, &pname);
 // (legacy) pf.active_profile no longer used; per-shader active profile is stored in active_shader_profiles
                                     effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), &pname);
@@ -3568,11 +3711,9 @@ if recorder.is_recording() {
                                     Ok(new_prog) => unsafe {
                                         gl.delete_program(program);
                                         program = new_prog;
-                                        println!("[hot] reloaded frag: {}", frag_path.display());
-                                    },
+                                        logi!("HOT", "reloaded frag: {}", frag_path.display());},
                                     Err(e) => {
-                                        eprintln!("[hot] frag compile failed (keeping previous): {e:?}");
-                                    }
+                                        logw!("HOT", "frag compile failed (keeping previous): {e:?}");}
                                 }
                             }
 
@@ -3585,11 +3726,9 @@ if recorder.is_recording() {
                                     Ok(new_prog) => unsafe {
                                         gl.delete_program(present_program);
                                         present_program = new_prog;
-                                        println!("[hot] reloaded present frag: {}", present_frag_path.display());
-                                    },
+                                        logi!("HOT", "reloaded present frag: {}", present_frag_path.display());},
                                     Err(e) => {
-                                        eprintln!("[hot] present compile failed (keeping previous): {e:?}");
-                                    }
+                                        logw!("HOT", "present compile failed (keeping previous): {e:?}");}
                                 }
                             }
                         }
@@ -3604,9 +3743,7 @@ if recorder.is_recording() {
                                 match serde_json::from_str::<ParamsFile>(&params_src) {
                                     Ok(new_pf) => {
                                         pf = new_pf;
-                                        println!("[params] reloaded version {}", pf.version);
-
-                                        // Re-resolve active profile (same precedence as startup).
+                                        logi!("PARAMS", "reloaded version {}", pf.version);// Re-resolve active profile (same precedence as startup).
                                         let mut next_active: Option<String> = pf.active_profile.clone();
                                         if next_active.is_none() && pf.profiles.contains_key("default") {
                                             next_active = Some("default".to_string());
@@ -3626,8 +3763,7 @@ if recorder.is_recording() {
                                         midi_conn_in = connect_midi(&effective_midi, store.clone());
                                     }
                                     Err(e) => {
-                                        eprintln!("[params] reload failed (keeping previous): {e}");
-                                    }
+                                        logw!("PARAMS", "reload failed (keeping previous): {e}");}
                                 }
                             }
                         }
@@ -3635,8 +3771,7 @@ if recorder.is_recording() {
 
                         if recorder.is_recording() {
                             pending_reload = true;
-                            println!("[recording] config changed on disk; will reload after stop");
-                        } else {
+                            logi!("RECORDING", "config changed on disk; will reload after stop");} else {
                             let rec_path = recording_cfg_path.clone();
                             let new_cfg = load_recording_config(&rec_path);
                             recording_hotkeys = build_recording_hotkey_map(&new_cfg);
@@ -3648,8 +3783,7 @@ if recorder.is_recording() {
                             rec_pbo_bytes = 0;
                             rec_pbo_index = 0;
                             rec_pbo_primed = false;
-                            println!(
-                                "[recording] reloaded: enabled={} {}x{}@{} {:?}/{:?}",
+                            logi!("RECORDING", "reloaded: enabled={} {}x{}@{} {:?}/{:?}",
                                 new_cfg.enabled,
                                 new_cfg.width,
                                 new_cfg.height,
@@ -3659,6 +3793,11 @@ if recorder.is_recording() {
                             );
                         }
                     }
+// Deferred reload for recording.json
+//
+// If the recording config file changes while we're recording, we set `pending_reload=true`
+// and apply it only after the recording stops. That keeps the capture pipeline coherent:
+// width/height/fps/container/codec are treated as "session parameters".
                     if pending_reload && !recorder.is_recording() {
                         pending_reload = false;
                         let rec_path = recording_cfg_path.clone();
@@ -3670,8 +3809,7 @@ if recorder.is_recording() {
                         rec_pbo_bytes = 0;
                         rec_pbo_index = 0;
                         rec_pbo_primed = false;
-                        println!(
-                            "[recording] reloaded after stop: enabled={} {}x{}@{} {:?}/{:?}",
+                        logi!("RECORDING", "reloaded after stop: enabled={} {}x{}@{} {:?}/{:?}",
                             new_cfg.enabled,
                             new_cfg.width,
                             new_cfg.height,

@@ -1,3 +1,12 @@
+//! Recording pipeline (FFmpeg worker)
+//!
+//! Recording is designed to be **non-blocking** for the render loop:
+//! - The render thread produces frames and pushes them into a bounded queue.
+//! - A worker thread reads frames and feeds an FFmpeg process.
+//!
+//! If the worker can't keep up (slow disk/encoder), frames may be **dropped** rather than stalling
+//! rendering. The goal is "keep the visuals live", not "never drop a frame".
+//!
 // src/recording.rs
 //
 // FBO-only recording via FFmpeg: reads pixels from a dedicated "record" FBO at a configurable

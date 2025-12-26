@@ -1,3 +1,15 @@
+//! Hot-reload watcher
+//!
+//! We watch **directories** (not individual files) because file replacement on save is often implemented as:
+//! write temp → rename/replace → delete old. Directory watching is the most reliable cross-platform approach.
+//!
+//! The watcher sends lightweight "reload" signals to the render thread, which then re-reads:
+//! - shader source (fragment shader)
+//! - params/output/recording JSON
+//!
+//! Any heavy work (shader compile, GL resource updates) remains on the render thread.
+//!
+
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{path::PathBuf, time::Duration};

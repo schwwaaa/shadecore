@@ -39,8 +39,6 @@ All of these are designed to be hot-reloaded so you can iterate without restarti
 
 - **State ownership + authority:** [State Ownership and Authority](/docs/11-state-ownership-and-authority.html)
 
-- **Pipeline overview:** [Pipeline Overview](/docs/12-pipeline.html)
-
 ## Where to look in code
 
 - `src/main.rs` — glue + event loop + orchestration

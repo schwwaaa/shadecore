@@ -30,6 +30,18 @@ What you write in GLSL is what runs.
 
 ## Purpose
 
+## Code Map
+
+If you're trying to understand the engine quickly:
+
+- `src/main.rs` — GL context setup, render loop, input threads (MIDI/OSC), hot-reload wiring
+- `src/presenter.rs` — preview window presentation (scaling/letterboxing)
+- `src/output/*` — Syphon/Spout/NDI/Stream routing glue + backends
+- `src/recording.rs` — FFmpeg recording worker (non-blocking design)
+- `assets/*.json` — runtime configuration (params/output/recording)
+
+The docs site mirrors this structure under `docs/_docs/`.
+
 This project exists to solve a common creative-coding problem:
 
 > *“I want to build my own visual tools without shipping an entire framework.”*

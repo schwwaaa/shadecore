@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+#
+# build_syphon.sh
+#
+# Helper script for macOS development. ShadeCore can build Syphon support either by:
+# - using the vendored `vendor/Syphon.framework`, or
+# - compiling the ObjC bridge in `native/syphon_bridge.m` and linking the framework.
+#
+# This script is only needed if you're experimenting with the Syphon bridge in isolation
+# or want a manual rebuild outside of `cargo build`.
+#
+set -euo pipefail
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
