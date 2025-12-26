@@ -1,3 +1,13 @@
+//! Spout2 output backend (Windows)
+//!
+//! This module wraps the native `spout_bridge` DLL, exposing a small C-ABI surface:
+//! - create/destroy sender
+//! - publish a GL texture each frame
+//!
+//! Notes:
+//! - The bridge exists so the Rust code does not need to bind directly to Spout2 C++.
+//! - `build.rs` is responsible for building the DLL and copying it next to the executable for `cargo run`.
+//!
 #[cfg(target_os = "windows")]
 mod win {
   use std::ffi::CString;

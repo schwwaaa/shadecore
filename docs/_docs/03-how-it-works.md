@@ -116,8 +116,3 @@ Plus:
 - The framebuffer texture is:
   - drawn to the preview window
   - shared with Syphon, Spout, Stream, or NDI depending on mode
----
-
-## Pipeline
-
-For the end-to-end flow (inputs → render tick → publish → record), see: **[Pipeline Overview](/docs/12-pipeline.html)**

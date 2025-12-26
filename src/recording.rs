@@ -1,3 +1,12 @@
+//! Recording pipeline (FFmpeg worker)
+//!
+//! Recording is designed to be **non-blocking** for the render loop:
+//! - The render thread produces frames and pushes them into a bounded queue.
+//! - A worker thread reads frames and feeds an FFmpeg process.
+//!
+//! If the worker can't keep up (slow disk/encoder), frames may be **dropped** rather than stalling
+//! rendering. The goal is "keep the visuals live", not "never drop a frame".
+//!
 // src/recording.rs
 //
 // FBO-only recording via FFmpeg: reads pixels from a dedicated "record" FBO at a configurable
@@ -218,14 +227,14 @@ impl Recorder {
     pub fn is_recording(&self) -> bool {
         self.is_recording
     }
-
+    #[allow(dead_code)]
     pub fn ensure_buf_size(&mut self) {
         let bytes = (self.cfg.width.max(1) as usize) * (self.cfg.height.max(1) as usize) * 4;
         if self.buf_rgba.len() != bytes {
             self.buf_rgba.resize(bytes, 0);
         }
     }
-
+    #[allow(dead_code)]
     pub fn buf_mut(&mut self) -> &mut [u8] {
         self.ensure_buf_size();
         self.buf_rgba.as_mut_slice()
@@ -305,7 +314,7 @@ impl Recorder {
         let Some(tx) = self.tx.as_ref() else { return; };
         let _ = tx.try_send(RecMsg::Frame(frame));
     }
-
+    #[allow(dead_code)]
     pub fn try_send_frame(&self) {
         if !self.is_recording {
             return;
@@ -359,7 +368,7 @@ fn spawn_ffmpeg(cfg: &RecordingCfg, out_path: &Path) -> Result<(Child, ChildStdi
     let fps = cfg.fps.max(1).to_string();
 
     let mut cmd = Command::new(&cfg.ffmpeg_path);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // raw RGBA frames in
     cmd.args([
@@ -425,6 +434,15 @@ fn spawn_ffmpeg(cfg: &RecordingCfg, out_path: &Path) -> Result<(Child, ChildStdi
     }
 
     let mut child = cmd.spawn()?;
+
+    // Pipe ffmpeg output through ShadeCore logging so everything is timestamped/tagged.
+    if let Some(out) = child.stdout.take() {
+        crate::logging::spawn_pipe_thread("ffmpeg_record_out", "FFMPEG_RECORD", out, false);
+    }
+    if let Some(err) = child.stderr.take() {
+        crate::logging::spawn_pipe_thread("ffmpeg_record_err", "FFMPEG_RECORD", err, true);
+    }
+
     let stdin = child
         .stdin
         .take()

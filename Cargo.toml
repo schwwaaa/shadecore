@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Timestamped logging (lightweight time formatting)
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+
 glow = "0.16"
 winit = "0.29"
 glutin = "0.31"
@@ -22,6 +25,8 @@ rosc = "0.10"
 grafton-ndi = { version = "0.9", optional = true }
 
 [features]
+# Feature flags
+# - `ndi`: enables NDI output support (requires NDI SDK/runtime; see docs/_docs/06-ndi.md)
 default = []
 ndi = ["dep:grafton-ndi"]
 

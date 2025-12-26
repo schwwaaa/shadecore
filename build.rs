@@ -11,7 +11,16 @@
 //   - copies spout_bridge.dll next to the built exe for `cargo run`
 //
 // Also:
-//   - declares cfg(has_syphon) to rustc (silences unexpected_cfgs warnings on non-mac targets)
+//   - declares cfg(has_syphon) to rustc (silences unexpected_cfgs warnings on non-mac targets)//
+// Environment variables (Windows / CMake):
+// - `CMAKE_TOOLCHAIN_FILE_<arch>` (optional): if set, passed through to CMake to support vcpkg/toolchains.
+// - `VCPKG_ROOT` (optional): if you are using vcpkg, CMake may pick it up via toolchain settings.
+//
+// Build script philosophy:
+// - Prefer "just works" defaults for `cargo build` / `cargo run`.
+// - Keep platform-specific logic contained here, so `src/` can stay mostly portable.
+//
+
 
 use std::env;
 use std::fs;
