@@ -51,6 +51,7 @@
         ]
     },
     "preview": {
+        "enabled": true,
         "scale_mode": "fit",
         "hotkeys": {
             "fit": [

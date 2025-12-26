@@ -1,3 +1,5 @@
+mod osc_introspection_helpers;
+
 use glow::HasContext;
 
 use glutin::config::ConfigTemplateBuilder;
@@ -10,19 +12,24 @@ use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasRawWindowHandle;
 
 use midir::{Ignore, MidiInput};
+use rosc::{OscPacket, OscType};
 use serde::Deserialize;
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::Write;
 use std::num::NonZeroU32;
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 mod recording;
 use recording::{Recorder, RecordingCfg};
+
+mod presenter;
+use presenter::{NullPresenter, Presenter, WindowPresenter};
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -76,6 +83,10 @@ fn default_preview_scale_mode() -> PreviewScaleMode {
     PreviewScaleMode::Fit
 }
 
+fn default_preview_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct PreviewHotkeysCfg {
     #[serde(default = "default_preview_hotkeys_fit")]
@@ -114,6 +125,9 @@ impl Default for PreviewHotkeysCfg {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct PreviewCfg {
+    #[serde(default = "default_preview_enabled")]
+    enabled: bool,
+
     #[serde(default = "default_preview_scale_mode")]
     scale_mode: PreviewScaleMode,
 
@@ -124,6 +138,7 @@ struct PreviewCfg {
 impl Default for PreviewCfg {
     fn default() -> Self {
         Self {
+            enabled: default_preview_enabled(),
             scale_mode: default_preview_scale_mode(),
             hotkeys: PreviewHotkeysCfg::default(),
         }
@@ -492,7 +507,7 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
     // Backwards compatible loader:
     // - If recording.json is a "controller" with active_profile + hotkeys, merge with recording.profiles.json.
     // - Otherwise, treat recording.json as a full RecordingCfg (legacy single-profile format).
-    #[derive(Debug, Clone, Deserialize, Default)]
+    #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
     struct RecordingHotkeys {
         #[serde(default)]
         toggle: Vec<String>,
@@ -502,7 +517,7 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
         stop: Vec<String>,
     }
 
-    #[derive(Debug, Clone, Deserialize)]
+    #[derive(Debug, Clone, Deserialize, PartialEq)]
     struct RecordingController {
         #[serde(default)]
         enabled: bool,
@@ -512,13 +527,13 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
         hotkeys: RecordingHotkeys,
     }
 
-    #[derive(Debug, Clone, Deserialize)]
+    #[derive(Debug, Clone, Deserialize, PartialEq)]
     struct RecordingProfilesFile {
         #[serde(default)]
         profiles: HashMap<String, RecordingProfile>,
     }
 
-    #[derive(Debug, Clone, Deserialize)]
+    #[derive(Debug, Clone, Deserialize, PartialEq)]
     struct RecordingProfile {
         #[serde(default)]
         out_dir: Option<PathBuf>,
@@ -807,11 +822,13 @@ void main() {
 /// -------------------------------
 /// params.json schema (matches your uploaded file)
 /// -------------------------------
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct ParamsFile {
     version: u32,
     #[serde(default)]
     midi: MidiGlobalCfg,
+    #[serde(default)]
+    osc: OscCfg,
     #[serde(default)]
     params: Vec<ParamDef>,
 
@@ -841,7 +858,7 @@ struct ParamsFile {
     profile_hotkeys: ProfileHotkeysCfg,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 struct MidiGlobalCfg {
     #[serde(default)]
     preferred_device_contains: Option<String>,
@@ -849,7 +866,123 @@ struct MidiGlobalCfg {
     channel: Option<u8>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct OscMappingCfg {
+    /// OSC address pattern. Can be:
+    /// - Full address (e.g. "/shadecore/param/gain")
+    /// - Prefix-relative (e.g. "/param/gain" or "param/gain")
+    addr: String,
+    /// Target param/uniform name (e.g. "u_gain")
+    param: String,
+    /// Optional override range for this mapping (used when normalized=true or for clamping in raw mode)
+    #[serde(default)]
+    min: Option<f32>,
+    #[serde(default)]
+    max: Option<f32>,
+    /// Optional smoothing override for this mapping
+    #[serde(default)]
+    smooth: Option<f32>,
+    /// Optional override for normalized handling ("normalized" or "raw")
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct OscCfg {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_osc_bind")]
+    bind: String,
+    #[serde(default = "default_osc_prefix")]
+    prefix: String,
+    #[serde(default = "default_true")]
+    normalized: bool,
+
+    /// Optional mapping table (same spirit as MIDI mappings):
+    /// maps OSC addresses to uniform/param names with optional min/max/smooth overrides.
+    #[serde(default)]
+    mappings: Vec<OscMappingCfg>,
+}
+
+fn default_osc_bind() -> String { "0.0.0.0:9000".into() }
+fn default_osc_prefix() -> String { "/shadecore".into() }
+
+impl Default for OscCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_osc_bind(),
+            prefix: default_osc_prefix(),
+            normalized: true,
+            mappings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OscMappingResolved {
+    param: String,
+    min: Option<f32>,
+    max: Option<f32>,
+    smooth: Option<f32>,
+    // true = normalized, false = raw
+    normalized: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OscRuntime {
+    cfg: OscCfg,
+    map: HashMap<String, OscMappingResolved>, // full addr -> mapping
+}
+
+impl OscRuntime {
+    fn new(cfg: OscCfg) -> Self {
+        let mut map = HashMap::new();
+        let prefix = cfg.prefix.trim_end_matches('/').to_string();
+        for m in &cfg.mappings {
+            let a = m.addr.trim();
+            if a.is_empty() { continue; }
+
+            let full = if a.starts_with(&prefix) {
+                a.to_string()
+            } else if a.starts_with('/') {
+                // if it's prefix-relative like "/param/...", join with prefix
+                if a.starts_with("/param/") || a.starts_with("/raw/") {
+                    format!("{}{}", prefix, a)
+                } else {
+                    // treat as absolute path
+                    a.to_string()
+                }
+            } else {
+                // "param/foo" or "raw/foo"
+                format!("{}/{}", prefix, a)
+            };
+
+            let mode_norm = match m.mode.as_deref().map(|s| s.to_lowercase()) {
+                Some(s) if s == "raw" => false,
+                Some(s) if s == "normalized" || s == "norm" || s == "param" => true,
+                _ => cfg.normalized, // default
+            };
+
+            map.insert(
+                full,
+                OscMappingResolved {
+                    param: m.param.clone(),
+                    min: m.min,
+                    max: m.max,
+                    smooth: m.smooth,
+                    normalized: mode_norm,
+                },
+            );
+        }
+        Self { cfg, map }
+    }
+}
+
+
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum ProfilePreset {
     /// Back-compat: { "u_gain": 1.0, "u_zoom": 2.0 }
@@ -864,7 +997,7 @@ enum ProfilePreset {
     V2(ProfilePresetV2),
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 struct ProfilePresetV2 {
     #[serde(default)]
     uniforms: HashMap<String, f32>,
@@ -908,7 +1041,7 @@ fn merge_midi_cfg(base: &MidiGlobalCfg, ov: Option<MidiGlobalCfg>) -> MidiGlobal
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct ParamDef {
     name: String,
     #[serde(default)]
@@ -925,14 +1058,14 @@ struct ParamDef {
     midi: Option<MidiBinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct MidiBinding {
     cc: u8,
     #[serde(default)]
     channel: Option<u8>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 struct ProfileHotkeysCfg {
     /// Cycle forward through profiles (default: BracketRight)
     #[serde(default = "default_profile_next")]
@@ -979,6 +1112,7 @@ struct ParamStore {
     values: HashMap<String, f32>,
     targets: HashMap<String, f32>,
     smooth: HashMap<String, f32>,
+    ranges: HashMap<String, (f32, f32)>,
     mappings: HashMap<(u8, u8), ParamMapping>, // (channel, cc) -> mapping
 }
 
@@ -1004,11 +1138,13 @@ impl ParamStore {
         let mut values = HashMap::new();
         let mut targets = HashMap::new();
         let mut smooth = HashMap::new();
+        let mut ranges = HashMap::new();
 
         for p in &pf.params {
             values.insert(p.name.clone(), p.default);
             targets.insert(p.name.clone(), p.default);
             smooth.insert(p.name.clone(), p.smoothing);
+            ranges.insert(p.name.clone(), (p.min, p.max));
         }
 
         let mappings = Self::build_mappings(pf, &pf.midi, &HashMap::new());
@@ -1021,6 +1157,7 @@ impl ParamStore {
             values,
             targets,
             smooth,
+            ranges,
             mappings,
         }
     }
@@ -1069,6 +1206,7 @@ impl ParamStore {
         let mut new_values: HashMap<String, f32> = HashMap::new();
         let mut new_targets: HashMap<String, f32> = HashMap::new();
         let mut new_smooth: HashMap<String, f32> = HashMap::new();
+        let mut new_ranges: HashMap<String, (f32, f32)> = HashMap::new();
 
         // Base MIDI settings from the file (profile can override later)
         let base_midi = new_pf.midi.clone();
@@ -1089,16 +1227,19 @@ impl ParamStore {
                     name.clone(),
                     *self.smooth.get(&name).unwrap_or(&p.smoothing),
                 );
+                new_ranges.insert(name.clone(), (p.min, p.max));
             } else {
                 new_values.insert(name.clone(), p.default);
                 new_targets.insert(name.clone(), p.default);
                 new_smooth.insert(name.clone(), p.smoothing);
+                new_ranges.insert(name.clone(), (p.min, p.max));
             }
         }
 
         self.values = new_values;
         self.targets = new_targets;
         self.smooth = new_smooth;
+        self.ranges = new_ranges;
 
         // If there is an active profile, it can override uniforms AND MIDI settings.
         if let Some(profile) = active_profile {
@@ -1224,6 +1365,118 @@ impl ParamStore {
 
         false
     }
+
+    fn set_target_raw(&mut self, name: &str, val: f32) -> bool {
+        if !self.values.contains_key(name) {
+            return false;
+        }
+        let (mn, mx) = self.ranges.get(name).copied().unwrap_or((val, val));
+        let v = val.clamp(mn, mx);
+        self.targets.insert(name.to_string(), v);
+        // keep existing smoothing
+        let s = self.smooth.get(name).copied().unwrap_or(0.0);
+        self.smooth.insert(name.to_string(), s);
+        true
+    }
+
+    fn set_target_normalized(&mut self, name: &str, x01: f32) -> bool {
+        if !self.values.contains_key(name) {
+            return false;
+        }
+        let (mn, mx) = self.ranges.get(name).copied().unwrap_or((0.0, 1.0));
+        let x = x01.clamp(0.0, 1.0);
+        let v = mn + (mx - mn) * x;
+        self.targets.insert(name.to_string(), v);
+        let s = self.smooth.get(name).copied().unwrap_or(0.0);
+        self.smooth.insert(name.to_string(), s);
+        true
+    }
+
+    fn apply_osc_runtime(&mut self, rt: &OscRuntime, addr: &str, args: &[OscType]) -> Option<(String, f32, bool)> {
+        // 1) mapping table (address -> param)
+        if let Some(m) = rt.map.get(addr) {
+            // extract numeric arg
+            let v = match args.get(0)? {
+                OscType::Float(f) => *f,
+                OscType::Double(d) => *d as f32,
+                OscType::Int(i) => *i as f32,
+                OscType::Long(l) => *l as f32,
+                _ => return None,
+            };
+            let name = m.param.as_str();
+            if !self.values.contains_key(name) {
+                return None;
+            }
+
+            let (mn, mx) = match (m.min, m.max) {
+                (Some(a), Some(b)) => (a, b),
+                _ => self.ranges.get(name).copied().unwrap_or((0.0, 1.0)),
+            };
+
+            let target = if m.normalized {
+                let x = v.clamp(0.0, 1.0);
+                mn + (mx - mn) * x
+            } else {
+                v.clamp(mn.min(mx), mn.max(mx))
+            };
+
+            self.targets.insert(name.to_string(), target);
+            if let Some(s) = m.smooth {
+                self.smooth.insert(name.to_string(), s);
+            }
+            return Some((name.to_string(), target, m.normalized));
+        }
+
+        // 2) fallback to built-in direct routes: /prefix/param/<name> and /prefix/raw/<name>
+        self.apply_osc(&rt.cfg, addr, args)
+    }
+
+
+    fn apply_osc(&mut self, osc: &OscCfg, addr: &str, args: &[OscType]) -> Option<(String, f32, bool)> {
+        // Returns (param_name, target_value, used_normalized) if applied
+        let prefix = osc.prefix.trim_end_matches('/');
+        let addr = addr.trim();
+
+        let p_param = format!("{}/param/", prefix);
+        let p_raw = format!("{}/raw/", prefix);
+
+        let (mode, name) = if let Some(rest) = addr.strip_prefix(&p_param) {
+            ("param", rest)
+        } else if let Some(rest) = addr.strip_prefix(&p_raw) {
+            ("raw", rest)
+        } else {
+            return None;
+        };
+
+        let name = name.trim_matches('/');
+        if name.is_empty() {
+            return None;
+        }
+        if args.is_empty() {
+            return None;
+        }
+
+        let v = match &args[0] {
+            OscType::Float(f) => *f as f32,
+            OscType::Double(d) => *d as f32,
+            OscType::Int(i) => *i as f32,
+            OscType::Long(l) => *l as f32,
+            _ => return None,
+        };
+
+        let used_norm = (mode == "param") && osc.normalized;
+        let ok = if used_norm {
+            self.set_target_normalized(name, v)
+        } else {
+            self.set_target_raw(name, v)
+        };
+        if !ok {
+            return None;
+        }
+        let target = *self.targets.get(name).unwrap_or(&v);
+        Some((name.to_string(), target, used_norm))
+    }
+
 
     fn tick(&mut self) {
         let keys: Vec<String> = self.values.keys().cloned().collect();
@@ -2068,6 +2321,109 @@ fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<m
     }
 }
 
+
+/// -------------------------------
+/// OSC input (UDP)
+/// -------------------------------
+struct OscHandle {
+    stop_tx: crossbeam_channel::Sender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for OscHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+fn connect_osc(rt: Arc<RwLock<OscRuntime>>, store: Arc<Mutex<ParamStore>>) -> Option<OscHandle> {
+    let osc_cfg = { rt.read().ok().map(|g| g.cfg.clone()).unwrap_or_default() };
+    if !osc_cfg.enabled {
+        return None;
+    }
+
+    let bind = osc_cfg.bind.clone();
+    let prefix = osc_cfg.prefix.clone();
+    let normalized = osc_cfg.normalized;
+
+    let sock = match UdpSocket::bind(&bind) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[osc] Failed to bind {bind}: {e}");
+            return None;
+        }
+    };
+
+    let _ = sock.set_nonblocking(true);
+
+    println!("[osc] listening on {bind} prefix={prefix} normalized={normalized}");
+
+    let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+
+    let join = std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+
+            match sock.recv_from(&mut buf) {
+                Ok((sz, from)) => {
+                    let pkt = match rosc::decoder::decode_udp(&buf[..sz]) {
+                        Ok((_rest, p)) => p,
+                        Err(_e) => continue,
+                    };
+
+                    fn handle_packet(pkt: OscPacket, store: &Arc<Mutex<ParamStore>>, rt: &OscRuntime, sock: &UdpSocket, from: std::net::SocketAddr) {
+                        match pkt {
+                            OscPacket::Message(msg) => {
+                                let addr = msg.addr;
+                                let args = msg.args;
+                                
+// OSC introspection (list/get/mappings). If handled, stop further processing.
+if crate::osc_introspection_helpers::osc_try_introspect(
+    &rt.cfg.prefix,
+    &addr,
+    store,
+    sock,
+    from,
+) {
+    return;
+}
+
+if let Ok(mut s) = store.lock() {
+                                    if let Some((name, target, used_norm)) = s.apply_osc_runtime(rt, &addr, args.as_slice()) {
+                                        let mode = if used_norm { "NORM" } else { "RAW" };
+                                        println!("[osc] {mode} {addr} -> {name} target={target}");
+                                    }
+                                }
+                            }
+                            OscPacket::Bundle(b) => {
+                                for p in b.content {
+                                    handle_packet(p, store, rt, sock, from);
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(rt_guard) = rt.read() { handle_packet(pkt, &store, &*rt_guard, &sock, from); }
+                }
+                Err(_e) => {
+                    // no data
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+        println!("[osc] stopped");
+    });
+
+    Some(OscHandle { stop_tx, join: Some(join) })
+}
+
+
 unsafe fn compile_program(gl: &glow::Context, vert_src: &str, frag_src: &str) -> glow::NativeProgram {
     let vs = gl.create_shader(glow::VERTEX_SHADER).expect("create_shader failed");
     gl.shader_source(vs, vert_src);
@@ -2547,6 +2903,9 @@ let event_proxy = event_loop.create_proxy();
     let mut rt = unsafe { create_render_target(&gl, size.width as i32, size.height as i32) };
 
     let mut midi_conn_in = connect_midi(&effective_midi, store.clone());
+    let osc_rt = Arc::new(RwLock::new(OscRuntime::new(pf.osc.clone())));
+    let _osc_handle = connect_osc(osc_rt.clone(), store.clone());
+
 
     let default_mode = if cfg!(target_os = "windows") {
         OutputMode::Spout
@@ -2604,6 +2963,21 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         .unwrap_or_else(|| "shadecore".to_string());
     let hotkey_map = build_hotkey_map(&output_cfg.hotkeys);
     let preview_hotkey_map = build_preview_hotkey_map(&output_cfg.preview.hotkeys);
+
+    // Presenter is a modular "preview" plugin: WindowPresenter draws the render target into the
+    // preview window; NullPresenter does nothing (headless/installation mode).
+    let mut presenter: Presenter = if output_cfg.preview.enabled {
+        Presenter::Window(WindowPresenter { vao })
+    } else {
+        println!("[preview] disabled (presenter=null) — running render + route only");
+        Presenter::Null(NullPresenter::default())
+    };
+
+    // If preview is disabled, hide the window so installs can run "headless" (render + route only).
+    // A GL surface/context still exists internally for portability/stability across macOS/Windows.
+    if !presenter.is_enabled() {
+        window.set_visible(false);
+    }
 
     let mut output_mode = output_cfg.output_mode;
 
@@ -2863,9 +3237,11 @@ if let PhysicalKey::Code(code) = event.physical_key {
                         // Preview window is resizable; render target stays fixed (recording resolution).
                         let w = new_size.width.max(1);
                         let h = new_size.height.max(1);
-                        unsafe {
-                            gl_surface.resize(&gl_context, NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap());
-                        }
+                        presenter.resize_window_surface(&gl_context, &gl_surface, w, h, |surf, ctx, ww, hh| {
+                            unsafe {
+                                surf.resize(ctx, NonZeroU32::new(ww).unwrap(), NonZeroU32::new(hh).unwrap());
+                            }
+                        });
                         window.request_redraw();
                     },
 
@@ -3120,31 +3496,24 @@ if recorder.is_recording() {
                             }
                         }
 
-                        gl.viewport(0, 0, win_w, win_h);
-                        gl.clear_color(0.02, 0.02, 0.02, 1.0);
-                        gl.clear(glow::COLOR_BUFFER_BIT);
-
-                        gl.use_program(Some(present_program));
-                        gl.bind_vertex_array(Some(vao));
-
-                        set_u_resolution(&gl, present_program, win_w, win_h);
-                        set_u_src_resolution(&gl, present_program, w, h);
-                        // 0=fit (letterbox), 1=fill (crop), 2=stretch, 3=pixel (centered)
-                        set_u_scale_mode(&gl, present_program, preview_scale_mode);
-
-                        if let Some(loc) = gl.get_uniform_location(present_program, "u_tex") {
-                            gl.uniform_1_i32(Some(&loc), 0);
-                        }
-                        gl.active_texture(glow::TEXTURE0);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(rt.tex));
-
-                        gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
-                        gl.bind_texture(glow::TEXTURE_2D, None);
-                        gl.bind_vertex_array(None);
-                        gl.use_program(None);
-
-                        gl_surface.swap_buffers(&gl_context).expect("swap_buffers failed");
+                        presenter.present(
+                            &gl,
+                            present_program,
+                            rt.tex,
+                            w,
+                            h,
+                            win_w,
+                            win_h,
+                            preview_scale_mode,
+                            &gl_context,
+                            &gl_surface,
+                            |surf, ctx| {
+                                surf.swap_buffers(ctx).expect("swap_buffers failed");
+                            },
+                            set_u_resolution,
+                            set_u_src_resolution,
+                            set_u_scale_mode,
+                        );
                     }
 
                     _ => {}

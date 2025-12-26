@@ -1,128 +1,135 @@
 {
-    "version": 1,
-    "midi": {
-        "preferred_device_contains": "IAC Driver",
-        "channel": 1
+  "version": 1,
+  "midi": {
+    "preferred_device_contains": "IAC Driver",
+    "channel": 1
+  },
+  "params": [
+    {
+      "name": "u_gain",
+      "type": "float",
+      "default": 0.5,
+      "min": 0.0,
+      "max": 1.0,
+      "smoothing": 0.12,
+      "midi": {
+        "cc": 1
+      }
     },
-    "params": [{
-            "name": "u_gain",
-            "type": "float",
-            "default": 0.5,
-            "min": 0.0,
-            "max": 1.0,
-            "smoothing": 0.12,
-            "midi": {
-                "cc": 1
-            }
-        },
-        {
-            "name": "u_zoom",
-            "type": "float",
-            "default": 1.0,
-            "min": 0.25,
-            "max": 4.0,
-            "smoothing": 0.18,
-            "midi": {
-                "cc": 2
-            }
-        },
-        {
-            "name": "u_spin",
-            "type": "float",
-            "default": 0.0,
-            "min": -3.14159,
-            "max": 3.14159,
-            "smoothing": 0.1,
-            "midi": {
-                "cc": 3
-            }
-        }
-    ],
-    "profile_hotkeys": {
-        "next": [
-            "BracketRight"
-        ],
-        "prev": [
-            "BracketLeft"
-        ]
+    {
+      "name": "u_zoom",
+      "type": "float",
+      "default": 1.0,
+      "min": 0.25,
+      "max": 4.0,
+      "smoothing": 0.18,
+      "midi": {
+        "cc": 2
+      }
     },
-    "shader_profiles": {
-        "shaders/01-kaleido.frag": {
-            "default": {
-                "uniforms": {
-                    "u_gain": 0.5,
-                    "u_zoom": 1.0,
-                    "u_spin": 0.0
-                }
-            },
-            "wide": {
-                "uniforms": {
-                    "u_gain": 0.7,
-                    "u_zoom": 2.0,
-                    "u_spin": 0.2
-                }
-            }
-        },
-        "shaders/02-plasmawarp.frag": {
-            "default": {
-                "uniforms": {
-                    "u_gain": 0.55,
-                    "u_zoom": 1.1,
-                    "u_spin": 0.0
-                }
-            },
-            "lofi": {
-                "uniforms": {
-                    "u_gain": 0.25,
-                    "u_zoom": 1.8,
-                    "u_spin": 0.15
-                }
-            },
-            "hot": {
-                "uniforms": {
-                    "u_gain": 0.85,
-                    "u_zoom": 0.9,
-                    "u_spin": 0.35
-                }
-            }
-        },
-        "shaders/03-tunnel.frag": {
-            "default": {
-                "uniforms": {
-                    "u_gain": 0.6,
-                    "u_zoom": 1.0,
-                    "u_spin": -0.2
-                }
-            },
-            "fast": {
-                "uniforms": {
-                    "u_gain": 0.75,
-                    "u_zoom": 0.8,
-                    "u_spin": 0.7
-                }
-            }
-        },
-        "shaders/04-voronoi.frag": {
-            "default": {
-                "uniforms": {
-                    "u_gain": 0.45,
-                    "u_zoom": 1.3,
-                    "u_spin": 0.0
-                }
-            },
-            "crunch": {
-                "uniforms": {
-                    "u_gain": 0.9,
-                    "u_zoom": 1.1,
-                    "u_spin": -0.25
-                }
-            }
-        }
-    },
-    "active_shader_profiles": {
-        "shaders/01-kaleido.frag": "default",
-        "shaders/02-plasmawarp.frag": "default",
-        "shaders/03-tunnel.frag": "default",
-        "shaders/04-voronoi.frag": "default"
+    {
+      "name": "u_spin",
+      "type": "float",
+      "default": 0.0,
+      "min": -3.14159,
+      "max": 3.14159,
+      "smoothing": 0.1,
+      "midi": {
+        "cc": 3
+      }
     }
+  ],
+  "profile_hotkeys": {
+    "next": [
+      "BracketRight"
+    ],
+    "prev": [
+      "BracketLeft"
+    ]
+  },
+  "shader_profiles": {
+    "shaders/01-kaleido.frag": {
+      "default": {
+        "uniforms": {
+          "u_gain": 0.5,
+          "u_zoom": 1.0,
+          "u_spin": 0.0
+        }
+      },
+      "wide": {
+        "uniforms": {
+          "u_gain": 0.7,
+          "u_zoom": 2.0,
+          "u_spin": 0.2
+        }
+      }
+    },
+    "shaders/02-plasmawarp.frag": {
+      "default": {
+        "uniforms": {
+          "u_gain": 0.55,
+          "u_zoom": 1.1,
+          "u_spin": 0.0
+        }
+      },
+      "lofi": {
+        "uniforms": {
+          "u_gain": 0.25,
+          "u_zoom": 1.8,
+          "u_spin": 0.15
+        }
+      },
+      "hot": {
+        "uniforms": {
+          "u_gain": 0.85,
+          "u_zoom": 0.9,
+          "u_spin": 0.35
+        }
+      }
+    },
+    "shaders/03-tunnel.frag": {
+      "default": {
+        "uniforms": {
+          "u_gain": 0.6,
+          "u_zoom": 1.0,
+          "u_spin": -0.2
+        }
+      },
+      "fast": {
+        "uniforms": {
+          "u_gain": 0.75,
+          "u_zoom": 0.8,
+          "u_spin": 0.7
+        }
+      }
+    },
+    "shaders/04-voronoi.frag": {
+      "default": {
+        "uniforms": {
+          "u_gain": 0.45,
+          "u_zoom": 1.3,
+          "u_spin": 0.0
+        }
+      },
+      "crunch": {
+        "uniforms": {
+          "u_gain": 0.9,
+          "u_zoom": 1.1,
+          "u_spin": -0.25
+        }
+      }
+    }
+  },
+  "active_shader_profiles": {
+    "shaders/01-kaleido.frag": "default",
+    "shaders/02-plasmawarp.frag": "default",
+    "shaders/03-tunnel.frag": "default",
+    "shaders/04-voronoi.frag": "default"
+  },
+  "osc": {
+    "enabled": true,
+    "bind": "0.0.0.0:9000",
+    "prefix": "/shadecore",
+    "normalized": true
+  }
 }

@@ -1,0 +1,42 @@
+{
+  "osc": {
+    "enabled": true,
+    "bind": "0.0.0.0:9000",
+    "prefix": "/shadecore",
+    "normalized": true,
+    "mappings": [
+      {
+        "addr": "/param/gain",
+        "param": "u_gain",
+        "min": 0.0,
+        "max": 2.0,
+        "smooth": 0.15,
+        "mode": "normalized"
+      },
+      {
+        "addr": "/param/zoom",
+        "param": "u_zoom",
+        "min": 0.25,
+        "max": 4.0,
+        "smooth": 0.1,
+        "mode": "normalized"
+      },
+      {
+        "addr": "/param/spin",
+        "param": "u_spin",
+        "min": -6.283,
+        "max": 6.283,
+        "smooth": 0.12,
+        "mode": "normalized"
+      },
+      {
+        "addr": "/raw/gain",
+        "param": "u_gain",
+        "min": 0.0,
+        "max": 2.0,
+        "smooth": 0.15,
+        "mode": "raw"
+      }
+    ]
+  }
+}

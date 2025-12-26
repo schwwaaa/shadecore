@@ -50,6 +50,7 @@
         "vflip": true
     },
     "preview": {
+        "enabled": true,
         "scale_mode": "fit",
         "hotkeys": {
             "fit": [
