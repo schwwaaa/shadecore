@@ -87,6 +87,7 @@ use std::time::{Duration, Instant};
 // - Keep "per-frame" logs off by default. (Key presses are still logged since they help explain state changes.)
 
 mod logging;
+mod validate;
 mod recording;
 use recording::{Recorder, RecordingCfg};
 
@@ -682,6 +683,18 @@ fn load_recording_config(path: &Path) -> RecordingCfg {
             // Load profiles file from the same assets directory.
             let profiles_path = path.parent().unwrap_or_else(|| Path::new(".")).join("recording.profiles.json");
             let profiles_data = std::fs::read_to_string(&profiles_path).ok();
+
+            // Validate controller <-> profiles linkage (friendly warnings)
+            if let Ok(rec_v) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(pdata) = &profiles_data {
+                    if let Ok(prof_v) = serde_json::from_str::<serde_json::Value>(pdata) {
+                        let issues = crate::validate::validate_recording_profiles(&rec_v, &prof_v);
+                        crate::validate::emit_summary("CONFIG", "recording profiles", &issues);
+                        crate::validate::emit_issues("CONFIG", &issues);
+                    }
+                }
+            }
+
 
             if let (Some(active), Some(pdata)) = (controller.active_profile.clone(), profiles_data) {
                 match serde_json::from_str::<RecordingProfilesFile>(&pdata) {
@@ -1830,8 +1843,8 @@ impl StreamSender {
             let mut cmd = Command::new(ffmpeg);
             cmd.args(&args)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit());
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -1840,7 +1853,16 @@ impl StreamSender {
                 }
             };
 
-            let Some(mut stdin) = child.stdin.take() else {
+            
+            // Pipe ffmpeg output through ShadeCore logging so everything is timestamped/tagged.
+            if let Some(out) = child.stdout.take() {
+                crate::logging::spawn_pipe_thread("ffmpeg_stream_out", "FFMPEG_STREAM", out, false);
+            }
+            if let Some(err) = child.stderr.take() {
+                crate::logging::spawn_pipe_thread("ffmpeg_stream_err", "FFMPEG_STREAM", err, true);
+            }
+
+let Some(mut stdin) = child.stdin.take() else {
                 logi!("OUTPUT", "Failed to open ffmpeg stdin.");let _ = child.kill();
                 let _ = child.wait();
                 return;
@@ -2803,11 +2825,37 @@ enum AppEvent {
 }
 
 fn main() {
-    let assets = find_assets_base();
+    
+    // --- Logging init (audit-friendly) ---------------------------------------------
+    // Optional: --log-file <path> (append) or env SHADECORE_LOG_FILE
+    let mut log_file: Option<std::path::PathBuf> = None;
+    {
+        let mut it = std::env::args().skip(1);
+        while let Some(a) = it.next() {
+            if a == "--log-file" {
+                if let Some(p) = it.next() {
+                    log_file = Some(std::path::PathBuf::from(p));
+                }
+            }
+        }
+        if log_file.is_none() {
+            if let Ok(p) = std::env::var("SHADECORE_LOG_FILE") {
+                if !p.trim().is_empty() {
+                    log_file = Some(std::path::PathBuf::from(p));
+                }
+            }
+        }
+    }
+    let run_id = crate::logging::init(log_file);
+    logi!("INIT", "run_id={run_id}");
+
+let assets = find_assets_base();
 
     let render_cfg_path = assets.join("render.json");
     let mut render_sel = load_render_sel(&assets);
-    let mut frag_variants = render_sel.frag_variants.clone();
+                                                                                    let _ = &render_sel;
+let _ = &render_sel;
+let mut frag_variants = render_sel.frag_variants.clone();
     let mut frag_profile_map = render_sel.frag_profile_map.clone();
     let mut frag_variant_idx = render_sel.frag_idx;
     let mut frag_path = render_sel.frag_path.clone();
@@ -2831,7 +2879,17 @@ fn main() {
     let params_src = read_to_string(&params_path);
     let mut pf: ParamsFile = serde_json::from_str(&params_src)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", params_path.display()));
-    logi!("PARAMS", "loaded version {}", pf.version);// Choose an initial active profile:
+    logi!("PARAMS", "loaded version {}", pf.version);
+
+    // Validate params.json relationships (profiles, uniform names, active selections)
+    {
+        let v: serde_json::Value = serde_json::from_str(&params_src).unwrap_or(serde_json::Value::Null);
+        let issues = crate::validate::validate_params_json(&v);
+        crate::validate::emit_summary("CONFIG", "params.json", &issues);
+        crate::validate::emit_issues("CONFIG", &issues);
+    }
+
+    // Choose an initial active profile:
     // 1) explicit active_profile
     // 2) "default" if present
     // 3) first profile (sorted) if present
@@ -2846,7 +2904,9 @@ fn main() {
     let mut effective_midi = pf.midi.clone();
     if let Some(p) = active_profile.as_deref() {
         effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), p);
-    }
+                                                                                    let _ = &effective_midi;
+let _ = &effective_midi;
+}
 
 let mut profile_hotkeys = build_profile_hotkey_map(&pf);
     let mut profile_names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
@@ -2995,8 +3055,10 @@ let event_proxy = event_loop.create_proxy();
     let size = window.inner_size();
     let mut rt = unsafe { create_render_target(&gl, size.width as i32, size.height as i32) };
 
-    let mut midi_conn_in = connect_midi(&effective_midi, store.clone());
-    let osc_rt = Arc::new(RwLock::new(OscRuntime::new(pf.osc.clone())));
+    let mut midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+    // keep-alive: the connection must be held to stay active
+    let _midi_connected = midi_conn_in.is_some();
+let osc_rt = Arc::new(RwLock::new(OscRuntime::new(pf.osc.clone())));
     let _osc_handle = connect_osc(osc_rt.clone(), store.clone());
 
 
@@ -3110,6 +3172,8 @@ let mut recording_hotkeys = build_recording_hotkey_map(&recording_cfg);
         ndi_cfg.vflip
     );
 
+    logi!("INIT", "ready (run_id={})", crate::logging::run_id());
+
     window.set_title(&format!(
         "shadecore - output: {:?} (press 1=Texture, 2=Syphon, 3=Spout, 4=Stream, 6=NDI)",
         output_mode
@@ -3192,8 +3256,11 @@ if let Some(pact) = profile_hotkeys.get(&code).cloned() {
                                         pf.active_profile = active_profile.clone();
 
                                         effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), &next_name);
-                                        midi_conn_in = connect_midi(&effective_midi, store.clone());
-                                    }
+                                                                                                                        let _ = &effective_midi;
+let _ = &effective_midi;
+midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+                                        let _midi_connected = midi_conn_in.is_some();
+}
                                 }
 
                                 
@@ -3222,8 +3289,11 @@ if is_next || is_prev {
         if let Some(pname) = active_profile.clone() {
             logi!("PARAMS", "shader switch -> profile: {}", pname);set_active_profile_for_shader(&mut pf, &assets, &frag_path, &pname);
             effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), &pname);
-            midi_conn_in = connect_midi(&effective_midi, store.clone());
-        } else {
+                                                                                            let _ = &effective_midi;
+let _ = &effective_midi;
+midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+                                        let _midi_connected = midi_conn_in.is_some();
+} else {
             logi!("PARAMS", "shader switch -> no profiles found (keeping existing mappings)");}
 
         // Force shader reload next tick (even if the file didn't change on disk).
@@ -3260,7 +3330,8 @@ if let Some(action) = recording_hotkeys.get(&code).copied() {
                                                     Ok(p) => {
                                                         rec_pbo_index = 0;
                                                         rec_pbo_primed = false;
-                                                        logi!("STATE", "recording -> started path={} (because toggle hotkey)", p.display());
+                                                        let sid = crate::logging::make_session_id("rec");
+                                                        logi!("RECORDING", "recording -> started sid={} path={} (because toggle hotkey)", sid, p.display());
                                                     }
                                                     Err(e) => loge!("ERROR", "recording start failed (because toggle hotkey): {e}"),
                                                 }
@@ -3276,7 +3347,8 @@ if let Some(action) = recording_hotkeys.get(&code).copied() {
                                                     Ok(p) => {
                                                         rec_pbo_index = 0;
                                                         rec_pbo_primed = false;
-                                                        logi!("STATE", "recording -> started path={} (because start hotkey)", p.display());
+                                                        let sid = crate::logging::make_session_id("rec");
+                                                        logi!("RECORDING", "recording -> started sid={} path={} (because start hotkey)", sid, p.display());
                                                     }
                                                     Err(e) => loge!("ERROR", "recording start failed (because start hotkey): {e}"),
                                                 }
@@ -3677,7 +3749,9 @@ if recorder.is_recording() {
                             if new_render_mtime.is_some() && new_render_mtime != render_cfg_mtime {
                                 render_cfg_mtime = new_render_mtime;
                                 render_sel = load_render_sel(&assets);
-                                frag_variants = render_sel.frag_variants.clone();
+                                                                                                                let _ = &render_sel;
+let _ = &render_sel;
+frag_variants = render_sel.frag_variants.clone();
                                 frag_profile_map = render_sel.frag_profile_map.clone();
                                 frag_variant_idx = render_sel.frag_idx;
                                 if render_sel.frag_path != frag_path {
@@ -3698,8 +3772,11 @@ if recorder.is_recording() {
                                     set_active_profile_for_shader(&mut pf, &assets, &frag_path, &pname);
 // (legacy) pf.active_profile no longer used; per-shader active profile is stored in active_shader_profiles
                                     effective_midi = store.lock().unwrap().apply_profile(&pf, &assets, Some(&frag_path), &pname);
-                                    midi_conn_in = connect_midi(&effective_midi, store.clone());
-                                }
+                                                                                                                    let _ = &effective_midi;
+let _ = &effective_midi;
+midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+                                        let _midi_connected = midi_conn_in.is_some();
+}
 
 
                             // 2) Did the active frag file change?
@@ -3760,8 +3837,11 @@ if recorder.is_recording() {
                                         profile_names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
 
                                         effective_midi = store.lock().unwrap().apply_params_file(&pf, active_profile.as_deref());
-                                        midi_conn_in = connect_midi(&effective_midi, store.clone());
-                                    }
+                                                                                                                        let _ = &effective_midi;
+let _ = &effective_midi;
+midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+                                        let _midi_connected = midi_conn_in.is_some();
+}
                                     Err(e) => {
                                         logw!("PARAMS", "reload failed (keeping previous): {e}");}
                                 }
@@ -3776,8 +3856,14 @@ if recorder.is_recording() {
                             let new_cfg = load_recording_config(&rec_path);
                             recording_hotkeys = build_recording_hotkey_map(&new_cfg);
                             recorder.set_cfg(new_cfg.clone());
-                        unsafe { resize_render_target(&gl, &mut rt, new_cfg.width as i32, new_cfg.height as i32); }
-                            unsafe { resize_render_target(&gl, &mut rt, new_cfg.width as i32, new_cfg.height as i32); }
+                        unsafe {
+                            resize_render_target(&gl, &mut rt, new_cfg.width as i32, new_cfg.height as i32);
+                        }
+
+                            unsafe {
+                                resize_render_target(&gl, &mut rt, new_cfg.width as i32, new_cfg.height as i32);
+                            }
+
                             rec_rt = None;
                             rec_pbos = None;
                             rec_pbo_bytes = 0;

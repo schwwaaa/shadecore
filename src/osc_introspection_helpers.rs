@@ -28,7 +28,7 @@ use std::net::UdpSocket;
 use rosc::{OscMessage, OscPacket, OscType};
 
 use crate::ParamStore;
-use crate::{logi, logw, loge};
+use crate::logi;
 
 fn osc_send_reply(sock: &UdpSocket, to: SocketAddr, addr: String, args: Vec<OscType>) {
     let msg = OscMessage { addr, args };
