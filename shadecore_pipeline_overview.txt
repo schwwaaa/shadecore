@@ -1,0 +1,119 @@
+SHADECORE PIPELINE — TEXT OVERVIEW (STABLE)
+
+PURPOSE
+ShadeCore is a real-time GPU shader engine that renders video frames from GLSL fragment shaders
+and routes the resulting texture to preview, external software, or recording pipelines.
+
+This document explains the pipeline without diagrams, focusing on mental models,
+state authority, and execution order. It is intended as a stable reference.
+
+------------------------------------------------------------
+HIGH-LEVEL PIPELINE (PRODUCT / CONCEPTUAL VIEW)
+------------------------------------------------------------
+
+Inputs
+- Live controls (MIDI, OSC, keyboard)
+- GLSL fragment shader code
+- Project configuration (JSON files)
+
+Processing
+- ShadeCore compiles shaders
+- Applies live control input to shader uniforms
+- Renders frames on the GPU in real time
+
+Outputs
+- Preview window
+- External routing (Syphon / Spout / NDI / Stream)
+- Recording to disk (video files)
+
+Key idea:
+ShadeCore produces a continuous stream of rendered video frames that can be routed
+to multiple destinations without changing how rendering itself works.
+
+------------------------------------------------------------
+LOW-LEVEL PIPELINE (ENGINEERING VIEW)
+------------------------------------------------------------
+
+CORE INVARIANT
+Everything renders into ONE authoritative offscreen framebuffer (FBO).
+All outputs consume that texture.
+Rendering never depends on outputs.
+
+EVENT LOOP OVERVIEW
+
+1. Input Handling
+   - MIDI and OSC update parameter targets
+   - Keyboard hotkeys update selection state
+     (shader selection, profile selection, output mode, recording)
+
+2. Hot Reload Detection
+   - File watchers mark configuration as dirty
+   - No heavy work occurs in watcher callbacks
+
+3. Render Tick (RedrawRequested)
+   This is the ONLY place GPU work happens.
+
+   a. Apply Hot Reload (if dirty)
+      - Reload JSON config
+      - Recompile shaders if needed
+      - Re-seed default uniform values
+
+   b. Update Uniform State
+      - Time, resolution, mouse
+      - Smoothed parameter values
+
+   c. GPU Render
+      - Draw fragment shader into offscreen FBO
+
+   d. Output Publish
+      - Publish FBO texture to selected backend
+      - Texture-only / Syphon / Spout / Stream / NDI
+
+   e. Preview Present
+      - Blit the same FBO texture to the preview window
+
+   f. Recording (optional)
+      - PBO readback (ping-pong)
+      - Send frames to FFmpeg encoder
+      - Frames may drop, render loop must not stall
+
+------------------------------------------------------------
+STATE OWNERSHIP SUMMARY
+------------------------------------------------------------
+
+Persistent Config (JSON)
+- render.json        → shader selection
+- params.json        → uniforms, ranges, profiles
+- output.json        → output routing + hotkeys
+- recording.json     → recording control + active profile
+- recording.profiles.json → recording presets
+
+Runtime Selection State
+- Active shader
+- Active shader profile
+- Active output mode
+- Recording on/off
+
+Runtime Performance State
+- Smoothed uniform values
+- Parameter targets
+- Time-based uniforms
+
+Config defines what is possible.
+Runtime state defines what is currently selected.
+Performance state defines what is happening this frame.
+
+------------------------------------------------------------
+DESIGN PHILOSOPHY
+------------------------------------------------------------
+
+- Rendering is authoritative and isolated
+- Outputs are consumers, not drivers
+- Recording is session-based and non-blocking
+- Live control never mutates config files
+- Hot reload is deferred and safe
+
+This separation keeps the engine stable, extensible,
+and suitable for live performance.
+
+END OF DOCUMENT
