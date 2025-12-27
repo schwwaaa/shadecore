@@ -1,0 +1,221 @@
+SHADECORE — LAUNCH & WORKSPACE INSTRUCTIONS (REVIEW STATE)
+=========================================================
+
+This document enumerates ALL valid and potential launch instructions
+based strictly on the current shadecore workspace codebase as provided.
+No speculative flags are assumed unless explicitly labeled as "PROPOSED".
+
+---------------------------------------------------------
+1. WORKSPACE STRUCTURE (RUST)
+---------------------------------------------------------
+
+This repository is a Cargo workspace.
+
+Crates present:
+
+1. crates/shadecore-cli
+   - Binary crate
+   - Produces the main executable: "shadecore"
+   - Owns:
+     - window creation (winit)
+     - OpenGL context
+     - rendering loop
+     - Syphon / Spout / NDI feature gates
+     - asset loading + config wiring
+     - logging
+     - hot-reload logic
+
+2. crates/shadecore-engine
+   - Library crate (no binary)
+   - Provides:
+     - asset discovery
+     - JSON config loading
+     - platform-specific config resolution
+     - shared engine utilities
+
+3. crates/shadecore-scratchpad
+   - Binary crate (stub only)
+   - Currently:
+     - prints a placeholder message
+     - exits immediately
+   - NOT integrated with engine or egui yet
+
+Workspace defaults:
+- default-members = ["crates/shadecore-cli"]
+
+---------------------------------------------------------
+2. VALID EXECUTION COMMANDS (CURRENT)
+---------------------------------------------------------
+
+All commands below are VALID for the provided repo state.
+
+--- Run main engine (default workspace member)
+From repo root:
+
+    cargo run
+
+--- Run main engine explicitly
+From repo root:
+
+    cargo run -p shadecore
+
+--- Run with feature flags (example: NDI)
+From repo root:
+
+    cargo run -p shadecore --features ndi
+
+--- Run scratchpad stub binary
+From repo root:
+
+    cargo run -p shadecore-scratchpad
+
+Expected behavior:
+- Prints stub message
+- Exits
+- No window, no engine, no egui
+
+--- INVALID (will fail)
+    cargo run -p shadecore-engine
+(reason: library crate, no binary)
+
+---------------------------------------------------------
+3. CURRENTLY PARSED CLI ARGUMENTS (shadecore binary)
+---------------------------------------------------------
+
+The shadecore binary DOES NOT use clap or structopt.
+
+Arguments are manually parsed via std::env::args().
+
+The ONLY supported runtime flag is:
+
+    --log-file <path>
+
+Example (Cargo pass-through required):
+
+    cargo run -p shadecore -- --log-file ./shadecore.log
+
+No other flags are currently recognized.
+
+The following flags DO NOT EXIST YET:
+
+    --scratchpad
+    --assets
+    --config
+    --shader
+    --fullscreen
+    --headless
+    --record
+    --preview
+
+Passing any of the above will be ignored or cause undefined behavior.
+
+---------------------------------------------------------
+4. SUPPORTED ENVIRONMENT VARIABLES
+---------------------------------------------------------
+
+These environment variables ARE read by the current code.
+
+--- SHADECORE_LOG_FILE
+If set, provides default log file path unless overridden by --log-file.
+
+Example:
+
+    SHADECORE_LOG_FILE=./shadecore.log cargo run -p shadecore
+
+--- SHADECORE_ASSETS
+If set and the path exists, overrides automatic asset discovery.
+
+Example:
+
+    SHADECORE_ASSETS=/absolute/path/to/assets cargo run -p shadecore
+
+---------------------------------------------------------
+5. ASSET DISCOVERY RULES (ACTUAL CODE PATH)
+---------------------------------------------------------
+
+Asset resolution DOES NOT use the current working directory.
+
+Resolution base:
+- Path::new(env!("CARGO_MANIFEST_DIR"))
+- This resolves to:
+  crates/shadecore-cli/
+
+Discovery order:
+
+1. If SHADECORE_ASSETS is set and exists → use it
+2. Else:
+   - Walk upward from crates/shadecore-cli/
+   - Stop when a directory literally named "assets" is found
+
+Typical resolved path:
+
+    <repo-root>/assets
+
+---------------------------------------------------------
+6. CONFIG FILES LOADED FROM ASSETS
+---------------------------------------------------------
+
+The engine loads the following files:
+
+Required:
+- assets/render.json
+
+Optional with OS-specific override:
+- assets/params.<os>.json   → fallback: assets/params.json
+- assets/output.<os>.json   → fallback: assets/output.json
+- assets/recording.<os>.json → fallback: assets/recording.json
+
+Where <os> resolves to one of:
+- windows
+- macos
+- linux
+
+---------------------------------------------------------
+7. FEATURE-GATED OUTPUT MODES
+---------------------------------------------------------
+
+These are compile-time features, NOT runtime flags.
+
+Available feature flags:
+
+- syphon   (macOS)
+- spout    (Windows)
+- ndi      (Windows/macOS)
+
+Example:
+
+    cargo run -p shadecore --features spout
+
+Runtime behavior depends on JSON config + feature availability.
+
+---------------------------------------------------------
+8. PROPOSED / NOT-YET-IMPLEMENTED FLAGS (DOCUMENTED ONLY)
+---------------------------------------------------------
+
+The following flags are NOT implemented yet, but are candidates
+for future work (including Scratchpad v0):
+
+    --scratchpad
+    --scratchpad <path>
+    --scratchpad-window
+    --scratchpad-overlay
+    --scratchpad-readonly
+    --scratchpad-autosave
+
+These are intentionally listed here ONLY for tracking.
+They are NOT valid in the current codebase.
+
+---------------------------------------------------------
+9. SCRATCHPAD STATUS (CURRENT)
+---------------------------------------------------------
+
+- No egui integration exists in shadecore-cli
+- No multi-window plumbing exists
+- No scratchpad flag is parsed
+- shadecore-scratchpad is a stub binary only
+
+All scratchpad behavior must be introduced explicitly.
+
+---------------------------------------------------------
+END OF DOCUMENT
+---------------------------------------------------------
