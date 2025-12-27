@@ -26,6 +26,12 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn repo_root() -> PathBuf {
+    // `CARGO_MANIFEST_DIR` points at crates/shadecore-cli; repo root is two levels up.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+
 fn main() {
     // Tell rustc that `cfg(has_syphon)` is an allowed cfg key (silences warnings on Windows/Linux).
     println!("cargo:rustc-check-cfg=cfg(has_syphon)");
@@ -47,12 +53,11 @@ fn main() {
 
 fn build_syphon_macos() {
     // Rebuild if these change
-    println!("cargo:rerun-if-changed=native/syphon_bridge.m");
-    println!("cargo:rerun-if-changed=native/syphon_bridge.h");
-    println!("cargo:rerun-if-changed=vendor/Syphon.framework");
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/syphon_bridge.m").display());
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/syphon_bridge.h").display());
+    println!("cargo:rerun-if-changed={}", repo_root().join("vendor/Syphon.framework").display());
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let vendor_dir = manifest_dir.join("vendor");
+    let vendor_dir = repo_root().join("vendor");
     let syphon_framework = vendor_dir.join("Syphon.framework");
 
     // Syphon is OPTIONAL. If missing, compile Texture-only on macOS.
@@ -70,7 +75,7 @@ fn build_syphon_macos() {
     // 1) Compile the ObjC bridge into libsyphon_bridge.a
     let mut cc_build = cc::Build::new();
     cc_build
-        .file("native/syphon_bridge.m")
+        .file(repo_root().join("native/syphon_bridge.m"))
         .flag("-fobjc-arc")
         .flag("-ObjC")
         .include(syphon_framework.join("Headers"))
@@ -94,7 +99,7 @@ fn build_syphon_macos() {
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let target_dir = env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("target"));
+        .unwrap_or_else(|_| repo_root().join("target"));
     let dest_dir = target_dir.join(&profile).join("Syphon.framework");
 
     if !dest_dir.exists() {
@@ -105,13 +110,12 @@ fn build_syphon_macos() {
 
 fn build_spout_windows() {
     // If these change, rerun
-    println!("cargo:rerun-if-changed=native/spout_bridge/CMakeLists.txt");
-    println!("cargo:rerun-if-changed=native/spout_bridge/spout_bridge.cpp");
-    println!("cargo:rerun-if-changed=native/spout_bridge/spout_bridge.h");
-    println!("cargo:rerun-if-changed=native/spout2");
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/spout_bridge/CMakeLists.txt").display());
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/spout_bridge/spout_bridge.cpp").display());
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/spout_bridge/spout_bridge.h").display());
+    println!("cargo:rerun-if-changed={}", repo_root().join("native/spout2").display());
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let spout2_dir = manifest_dir.join("native").join("spout2");
+    let spout2_dir = repo_root().join("native").join("spout2");
 
     if !spout2_dir.exists() {
         println!(
@@ -130,7 +134,7 @@ fn build_spout_windows() {
     };
 
     // Build the CMake project (spout_bridge DLL + import lib)
-    let dst = cmake::Config::new("native/spout_bridge")
+    let dst = cmake::Config::new(repo_root().join("native/spout_bridge"))
         .define("SPOUT2_DIR", spout2_dir.to_string_lossy().to_string())
         .profile(cmake_build_type)
         .build_target("spout_bridge")   // <-- THIS is the key fix
@@ -147,7 +151,7 @@ fn build_spout_windows() {
     // Copy DLL next to the exe for `cargo run`
     let target_dir = env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("target"));
+        .unwrap_or_else(|_| repo_root().join("target"));
     let exe_dir = target_dir.join(&profile);
 
     let dest_dll = exe_dir.join("spout_bridge.dll");

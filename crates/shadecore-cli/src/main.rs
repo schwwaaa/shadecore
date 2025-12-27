@@ -70,6 +70,9 @@ use std::io::Write;
 use std::num::NonZeroU32;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
+use shadecore_engine::assets::read_to_string;
+use shadecore_engine::config::{load_engine_config_from};
+use shadecore_engine::config::load_render_selection;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
@@ -2323,36 +2326,6 @@ fn tex_id_u32(tex: glow::NativeTexture) -> u32 {
     tex.0.get()
 }
 
-fn read_to_string(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()))
-}
-
-fn find_assets_base() -> PathBuf {
-    if let Ok(p) = std::env::var("SHADECORE_ASSETS") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
-}
-
-fn pick_platform_json(assets: &Path, stem: &str) -> PathBuf {
-    let os = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        "other"
-    };
-
-    let platform = assets.join(format!("{stem}.{os}.json"));
-    if platform.exists() {
-        platform
-    } else {
-        assets.join(format!("{stem}.json"))
-    }
-}
 
 
 fn connect_midi(midi: &MidiGlobalCfg, store: Arc<Mutex<ParamStore>>) -> Option<midir::MidiInputConnection<()>> {
@@ -2655,20 +2628,9 @@ fn set_u_time(gl: &glow::Context, prog: glow::NativeProgram, t: f32) {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RenderSel {
-    frag_path: std::path::PathBuf,
-    present_frag_path: std::path::PathBuf,
-    /// Optional list of fragment shader variants to cycle with hotkeys.
-    /// If empty, falls back to `frag_path`.
-    frag_variants: Vec<std::path::PathBuf>,
-    /// Active index within `frag_variants`.
-    frag_idx: usize,
+// Render selection is now defined in shadecore-engine (single source of truth).
+type RenderSel = shadecore_engine::config::RenderSelection;
 
-    /// Optional mapping from a frag variant path -> params profile name.
-    /// Used to make "MIDI + uniforms per shader" automatic.
-    frag_profile_map: std::collections::HashMap<std::path::PathBuf, String>,
-}
 
 /// Optional render config (assets/render.json) for hot-swapping shaders without changing code.
 /// If the file is missing or invalid, we fall back to defaults.
@@ -2725,96 +2687,7 @@ fn resolve_assets_path(assets: &std::path::Path, s: &str) -> std::path::PathBuf 
     }
 }
 
-fn load_render_sel(assets: &std::path::Path) -> RenderSel {
-    // defaults (what already works)
-    let default_frag = assets.join("shaders").join("default.frag");
-    let default_present = assets.join("shaders").join("present.frag");
-    let render_cfg = assets.join("render.json");
-
-    let data = match std::fs::read_to_string(&render_cfg) {
-        Ok(s) => s,
-        Err(_) => {
-            return RenderSel {
-                frag_path: default_frag.clone(),
-                present_frag_path: default_present.clone(),
-                frag_variants: vec![default_frag],
-                frag_idx: 0,
-                frag_profile_map: std::collections::HashMap::new(),
-            }
-        }
-    };
-
-    match serde_json::from_str::<RenderJson>(&data) {
-        Ok(rj) => {
-            // Build fragment variants list (optional).
-            let mut frag_variants: Vec<std::path::PathBuf> = Vec::new();
-            if let Some(list) = rj.frag_variants.as_ref() {
-                for s in list {
-                    frag_variants.push(resolve_assets_path(assets, s));
-                }
-            }
-            if frag_variants.is_empty() {
-                // Back-compat: single `frag` string.
-                let single = rj
-                    .frag
-                    .as_deref()
-                    .map(|s| resolve_assets_path(assets, s))
-                    .unwrap_or_else(|| default_frag.clone());
-                frag_variants.push(single);
-            }
-
-            // Choose active index by matching `active_frag` (exact string match on the original entries),
-            // otherwise default to 0.
-            let mut frag_idx: usize = 0;
-            if let (Some(active), Some(list)) = (rj.active_frag.as_ref(), rj.frag_variants.as_ref()) {
-                if let Some(pos) = list.iter().position(|s| s == active) {
-                    frag_idx = pos.min(frag_variants.len().saturating_sub(1));
-                }
-            }
-
-            let frag_path = frag_variants
-                .get(frag_idx)
-                .cloned()
-                .unwrap_or_else(|| default_frag.clone());
-
-            let present_frag_path = rj
-                .present_frag
-                .as_deref()
-                .map(|s| resolve_assets_path(assets, s))
-                .unwrap_or_else(|| default_present.clone());
-
-            // Optional frag->profile mapping
-            let mut frag_profile_map: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
-            if let Some(map) = rj.frag_profile_map.as_ref() {
-                for (k, v) in map {
-                    frag_profile_map.insert(resolve_assets_path(assets, k), v.clone());
-                }
-            }
-
-            RenderSel {
-                frag_path,
-                present_frag_path,
-                frag_variants,
-                frag_idx,
-                frag_profile_map,
-            }
-        }
-        Err(e) => {
-            loge!(
-                "CONFIG",
-                "failed to parse render.json ({}); using defaults. reason=JSON parse error: {e}",
-                render_cfg.display()
-            );
-            RenderSel {
-                frag_path: default_frag.clone(),
-                present_frag_path: default_present.clone(),
-                frag_variants: vec![default_frag],
-                frag_idx: 0,
-                frag_profile_map: std::collections::HashMap::new(),
-            }
-        }
-    }
-}
+// (moved to shadecore-engine::config::load_render_selection)
 
 fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
@@ -2849,10 +2722,16 @@ fn main() {
     let run_id = crate::logging::init(log_file);
     logi!("INIT", "run_id={run_id}");
 
-let assets = find_assets_base();
+    let eng_cfg = load_engine_config_from(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| {
+        eprintln!("ShadeCore init error: {e}");
+        std::process::exit(1);
+    });
 
-    let render_cfg_path = assets.join("render.json");
-    let mut render_sel = load_render_sel(&assets);
+    let assets_root = eng_cfg.assets.clone();
+    let assets = eng_cfg.paths.assets_dir.clone();
+
+    let render_cfg_path = eng_cfg.paths.render_json.clone();
+    let mut render_sel = eng_cfg.render.clone();
                                                                                     let _ = &render_sel;
 let _ = &render_sel;
 let mut frag_variants = render_sel.frag_variants.clone();
@@ -2860,8 +2739,8 @@ let mut frag_variants = render_sel.frag_variants.clone();
     let mut frag_variant_idx = render_sel.frag_idx;
     let mut frag_path = render_sel.frag_path.clone();
     let mut present_frag_path = render_sel.present_frag_path.clone();
-    let params_path = pick_platform_json(&assets, "params");
-    let output_cfg_path = pick_platform_json(&assets, "output");
+    let params_path = eng_cfg.params.path.clone();
+    let output_cfg_path = eng_cfg.output.path.clone();
 
     logi!("INIT", "assets base: {}", assets.display());
     logi!("INIT", "assets render.json: {}", render_cfg_path.display());
@@ -2869,14 +2748,16 @@ let mut frag_variants = render_sel.frag_variants.clone();
     logi!("INIT", "present shader: {}", present_frag_path.display());
     logi!("INIT", "assets params.json: {}", params_path.display());
     logi!("INIT", "assets output.json: {}", output_cfg_path.display());
-    let recording_cfg_path = pick_platform_json(&assets, "recording");
+    let recording_cfg_path = eng_cfg.recording.path.clone();
     logi!("INIT", "assets recording.json: {}", recording_cfg_path.display());
 
 
     let frag_src = read_to_string(&frag_path);
     let present_frag_src = read_to_string(&present_frag_path);
 
-    let params_src = read_to_string(&params_path);
+    // Keep the raw params.json text around for validation + error reporting.
+    let params_src = eng_cfg.params.src.clone();
+
     let mut pf: ParamsFile = serde_json::from_str(&params_src)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", params_path.display()));
     logi!("PARAMS", "loaded version {}", pf.version);
@@ -3748,7 +3629,10 @@ if recorder.is_recording() {
                             let mut selection_changed = false;
                             if new_render_mtime.is_some() && new_render_mtime != render_cfg_mtime {
                                 render_cfg_mtime = new_render_mtime;
-                                render_sel = load_render_sel(&assets);
+                                match load_render_selection(&assets_root) {
+                                    Ok(new_sel) => render_sel = new_sel,
+                                    Err(e) => logw!("RENDER", "render.json reload failed: {e}"),
+                                }
                                                                                                                 let _ = &render_sel;
 let _ = &render_sel;
 frag_variants = render_sel.frag_variants.clone();
@@ -3816,34 +3700,45 @@ midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
                             let new_params_mtime = file_mtime(&params_path);
                             if new_params_mtime.is_some() && new_params_mtime != params_mtime {
                                 params_mtime = new_params_mtime;
-                                let params_src = read_to_string(&params_path);
-                                match serde_json::from_str::<ParamsFile>(&params_src) {
-                                    Ok(new_pf) => {
-                                        pf = new_pf;
-                                        logi!("PARAMS", "reloaded version {}", pf.version);// Re-resolve active profile (same precedence as startup).
-                                        let mut next_active: Option<String> = pf.active_profile.clone();
-                                        if next_active.is_none() && pf.profiles.contains_key("default") {
-                                            next_active = Some("default".to_string());
-                                        }
-                                        if next_active.is_none() {
-                                            let names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
-                                            if let Some(first) = names.first() {
-                                                next_active = Some(first.clone());
-                                            }
-                                        }
-                                        active_profile = next_active;
-
-                                        profile_hotkeys = build_profile_hotkey_map(&pf);
-                                        profile_names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
-
-                                        effective_midi = store.lock().unwrap().apply_params_file(&pf, active_profile.as_deref());
-                                                                                                                        let _ = &effective_midi;
-let _ = &effective_midi;
-midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
-                                        let _midi_connected = midi_conn_in.is_some();
-}
+                                let params_src = match shadecore_engine::config::load_json_file(&params_path) {
+                                    Ok(lj) => lj.src,
                                     Err(e) => {
-                                        logw!("PARAMS", "reload failed (keeping previous): {e}");}
+                                        logw!("PARAMS", "reload failed (keeping previous): {e}");
+                                        String::new()
+                                    }
+                                };
+                                if params_src.is_empty() {
+                                    // error already logged; keep previous
+                                } else {
+                                    match serde_json::from_str::<ParamsFile>(&params_src) {
+                                        Ok(new_pf) => {
+                                            pf = new_pf;
+                                            logi!("PARAMS", "reloaded version {}", pf.version);
+                                            // Re-resolve active profile (same precedence as startup).
+                                            let mut next_active: Option<String> = pf.active_profile.clone();
+                                            if next_active.is_none() && pf.profiles.contains_key("default") {
+                                                next_active = Some("default".to_string());
+                                            }
+                                            if next_active.is_none() {
+                                                let names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
+                                                if let Some(first) = names.first() {
+                                                    next_active = Some(first.clone());
+                                                }
+                                            }
+                                            active_profile = next_active;
+                                
+                                            profile_hotkeys = build_profile_hotkey_map(&pf);
+                                            profile_names = sorted_profile_names_for_shader(&pf, &assets, &frag_path);
+                                
+                                            effective_midi = store.lock().unwrap().apply_params_file(&pf, active_profile.as_deref());
+                                            let _ = &effective_midi;
+                                            midi_conn_in = Some(connect_midi(&effective_midi, store.clone()));
+                                            let _midi_connected = midi_conn_in.is_some();
+                                        }
+                                        Err(e) => {
+                                            logw!("PARAMS", "reload failed (keeping previous): {e}");
+                                        }
+                                    }
                                 }
                             }
                         }

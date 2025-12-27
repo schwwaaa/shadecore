@@ -1,0 +1,43 @@
+[package]
+name = "shadecore"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shadecore-engine = { path = "../shadecore-engine" }
+# Timestamped logging (lightweight time formatting)
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+
+glow = "0.16"
+winit = "0.29"
+glutin = "0.31"
+glutin-winit = "0.4"
+raw-window-handle = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6.1"
+midir = "0.10"
+anyhow = "1"
+crossbeam-channel = "0.5"
+rosc = "0.10"
+
+# Optional NDI output (requires NDI SDK installed; build with --features ndi)
+# Using grafton-ndi 0.9.x API (PixelFormat/ScanType/VideoFrame builder, etc.)
+grafton-ndi = { version = "0.9", optional = true }
+
+[features]
+# Feature flags
+# - `ndi`: enables NDI output support (requires NDI SDK/runtime; see docs/_docs/06-ndi.md)
+default = []
+ndi = ["dep:grafton-ndi"]
+
+[build-dependencies]
+cc = "1"
+cmake = "0.1"
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_syphon)'] }

@@ -1,0 +1,7 @@
+[package]
+name = "shadecore-scratchpad"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shadecore-engine = { path = "../shadecore-engine" }

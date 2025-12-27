@@ -1424,8 +1424,24 @@ dependencies = [
  "rosc",
  "serde",
  "serde_json",
+ "shadecore-engine",
  "time",
  "winit",
+]
+
+[[package]]
+name = "shadecore-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shadecore-scratchpad"
+version = "0.1.0"
+dependencies = [
+ "shadecore-engine",
 ]
 
 [[package]]
